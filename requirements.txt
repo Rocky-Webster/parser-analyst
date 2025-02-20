@@ -1,4 +1,6 @@
-selenium==4.12.0
-pandas==2.0.3
-webdriver-manager==4.0.1
-tqdm==4.66.1
+selenium
+pandas
+webdriver-manager
+tqdm
+PyQt6
+tkhtmlview
