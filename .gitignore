@@ -1,0 +1,16 @@
+# Временные файлы Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Локальные данные
+data/*
+*.log
+
+# Зависимости
+venv/
+.env
+
+# VS Code
+.vscode/
