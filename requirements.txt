@@ -2,5 +2,6 @@ selenium
 pandas
 webdriver-manager
 tqdm
-PyQt6
+customtkinter
 tkhtmlview
+spacy

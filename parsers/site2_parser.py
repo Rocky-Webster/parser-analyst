@@ -6,12 +6,17 @@ from utils.file_utils import save_to_csv
 from utils.logger import setup_logger
 import os
 import re
+import spacy
+from collections import Counter
 
 logger = setup_logger()
 
+# Загружаем модель spaCy для русского языка
+nlp = spacy.load("ru_core_news_sm")
+
 class Site2Parser:
     def parse(self, link=None, output_dir="data"):
-        """Парсинг отзывов со второго сайта (iRecommend), включая переход по страницам."""
+        """Парсинг отзывов со второго сайта (iRecommend), включая переход по страницам и выделение ключевых слов."""
 
         if not link:
             logger.error("Ссылка для парсинга не передана!")
@@ -35,73 +40,75 @@ class Site2Parser:
             except Exception:
                 save_filename = "irecommend_reviews.csv"
 
-            output_path = os.path.join(output_dir, save_filename)
+            output_path = os.path.join(output_dir, save_filename).replace("\\", "/")
 
             parsed_reviews = []
-            page_num = 1  # Счетчик страниц
 
-            while True:
+            # Сначала парсим начальную страницу
+            page_urls = [link]
+
+            # Собираем ссылки пагинации
+            try:
+                pager = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "ul.pager"))
+                )
+                page_links = pager.find_elements(By.TAG_NAME, "a")
+                page_urls.extend([link.get_attribute("href") for link in page_links])
+            except Exception as e:
+                logger.warning(f"Не удалось найти пагинацию: {e}")
+                page_urls = [link]
+
+            # Обходим все страницы
+            page_num = 1
+            for page_url in page_urls:
+                logger.info(f"Обрабатываем страницу {page_num}")
+                driver.get(page_url)
+                
+                # Ожидание загрузки отзывов и прокрутка
+                driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 try:
-                    logger.info(f"Обрабатываем страницу {page_num}")
-
-                    # Ожидание загрузки отзывов (проверяем оба возможных контейнера)
-                    try:
-                        reviews_section = WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located((By.CLASS_NAME, "list-comments"))
-                        )
-                    except:
-                        try:
-                            reviews_section = WebDriverWait(driver, 10).until(
-                                EC.presence_of_element_located((By.CLASS_NAME, "item-list"))
-                            )
-                        except:
-                            logger.warning("Блок отзывов не найден на странице!")
-                            break  # Прекращаем парсинг, если отзывы не найдены
-
-                    reviews = reviews_section.find_elements(By.CLASS_NAME, 'item')
-
-                    for review in reviews:
-                        try:
-                            # Имя пользователя
-                            username = review.find_element(By.CLASS_NAME, 'authorName').text.strip()
-
-                            # Оценка (количество закрашенных звездочек)
-                            stars = review.find_elements(By.CLASS_NAME, 'star')
-                            rating = sum(1 for star in stars if star.find_elements(By.CLASS_NAME, 'on'))
-
-                            # Дата отзыва
-                            date = review.find_element(By.CLASS_NAME, 'created').text.strip()
-
-                            # Текст отзыва (заголовок отзыва)
-                            review_title = review.find_element(By.CLASS_NAME, 'reviewTitle').text.strip()
-
-                            parsed_reviews.append({
-                                "Имя пользователя": username,
-                                "Оценка": rating,
-                                "Дата": date,
-                                "Текст отзыва": review_title,
-                            })
-                        except Exception as e:
-                            logger.warning(f"Ошибка при обработке отзыва: {e}")
-                            continue
-
-                    # Попытка найти кнопку "Следующая страница"
-                    next_page_element = driver.find_elements(By.CLASS_NAME, 'pager-next') or driver.find_elements(By.CLASS_NAME, 'pager-last')
-                    if next_page_element and next_page_element[0].find_elements(By.TAG_NAME, 'a'):
-                        next_page_url = next_page_element[0].find_element(By.TAG_NAME, 'a').get_attribute('href')
-                        logger.info(f"Переход на следующую страницу: {next_page_url}")
-                        driver.get(next_page_url)
-                        WebDriverWait(driver, 10).until(
-                            EC.presence_of_element_located((By.CLASS_NAME, "list-comments"))
-                        )
-                        page_num += 1
-                    else:
-                        logger.info("Достигнут конец списка страниц.")
-                        break
-
-                except Exception as e:
-                    logger.warning(f"Ошибка при обработке страницы: {e}")
+                    reviews_section = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, "list-comments"))
+                    )
+                except:
+                    logger.warning("Блок отзывов не найден на странице!")
                     break
+
+                reviews = reviews_section.find_elements(By.CLASS_NAME, 'item')
+                logger.info(f"Найдено {len(reviews)} отзывов на странице {page_num}")
+
+                for review in reviews:
+                    try:
+                        username = review.find_element(By.CLASS_NAME, 'authorName').text.strip()
+                        stars = review.find_elements(By.CLASS_NAME, 'star')
+                        rating = sum(1 for star in stars if star.find_elements(By.CLASS_NAME, 'on'))
+                        date = review.find_element(By.CLASS_NAME, 'created').text.strip()
+                        review_title = review.find_element(By.CLASS_NAME, 'reviewTitle').text.strip()
+
+                        # Выделение ключевых слов с помощью spaCy
+                        doc = nlp(review_title.lower())  # Приводим текст к нижнему регистру
+                        keywords = []
+                        for token in doc:
+                            if not token.is_stop and not token.is_punct and token.pos_ in ["NOUN", "VERB", "ADJ"]:  # Существительные, глаголы, прилагательные
+                                keywords.append(token.lemma_)  # Используем лемму для нормализации
+
+                        # Берем 3 наиболее частых ключевых слова (или меньше, если их меньше)
+                        keyword_counts = Counter(keywords)
+                        top_keywords = [word for word, count in keyword_counts.most_common(3) if count > 1]  # Только слова, встречающиеся > 1 раза
+                        keywords_str = ", ".join(top_keywords) if top_keywords else "Нет ключевых слов"
+
+                        parsed_reviews.append({
+                            "Имя пользователя": username,
+                            "Оценка": rating,
+                            "Дата": date,
+                            "Текст отзыва": review_title,
+                            "Ключевые слова": keywords_str  # Выделенные ключевые слова
+                        })
+                    except Exception as e:
+                        logger.warning(f"Ошибка при обработке отзыва: {e}")
+                        continue
+
+                page_num += 1
 
             # Сохранение данных
             if parsed_reviews:
