@@ -34,7 +34,7 @@ class Site3Parser:
             )
 
             try:
-                product_name_elem = driver.find_element(By.CLASS_NAME, 'l2v_27')
+                product_name_elem = driver.find_element(By.CLASS_NAME, 'l9z_29')
                 product_name = product_name_elem.text.strip()
                 safe_product_name = re.sub(r'[<>:"/\\|?*]+', '', product_name).replace(' ', '_')
                 save_filename = f"{safe_product_name}_ozon.csv"
@@ -79,11 +79,11 @@ class Site3Parser:
                 
                 for review in reviews:
                     try:
-                        username_elem = review.find_element(By.CLASS_NAME, 'pp3_30')
+                        username_elem = review.find_element(By.CLASS_NAME, 'u8p_32')
                         WebDriverWait(driver, 5).until(lambda d: username_elem.text.strip() != "")
                         username = username_elem.text.strip() or username_elem.get_attribute('innerText').strip()
 
-                        date_elem = review.find_element(By.CLASS_NAME, 'ps4_30')
+                        date_elem = review.find_element(By.CLASS_NAME, 'xp6_32')
                         WebDriverWait(driver, 5).until(lambda d: date_elem.text.strip() != "")
                         date = date_elem.text.strip() or date_elem.get_attribute('innerText').strip()
 

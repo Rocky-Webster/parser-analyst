@@ -11,8 +11,14 @@ from parsers.site2_parser import Site2Parser
 from parsers.site3_parser import Site3Parser
 from visualization import plot_rating_histogram
 from tkinter import messagebox, filedialog
-from tkinter import ttk  # Для Treeview
-from review_analyzer import ReviewAnalyzer  # Импортируем наш анализатор
+from tkinter import ttk
+import pandas as pd
+import openpyxl
+from openpyxl.utils import get_column_letter
+from openpyxl.styles import Alignment
+from review_analyzer import ReviewAnalyzer
+import matplotlib.pyplot as plt
+from collections import Counter
 
 # Константы
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -36,34 +42,35 @@ class ParserApp:
         self.root.title("Парсер отзывов")
         self.root.geometry(WINDOW_SIZE)
         self.root.resizable(True, True)
-        self.root.configure(bg="#1A1A1A")  # Явно указываем тёмный фон для корневого окна
+        self.root.configure(bg="#1A1A1A")
         self.running = False
 
         self.output_dir = ctk.StringVar(value=DATA_DIR)
         self.site_links = {site: ctk.StringVar() for site in SITE_NAMES}
+        self.use_preprocessing = ctk.BooleanVar(value=True)  # Переключатель для предобработки
+        self.csv_files = []  # Добавляем переменную для хранения путей к CSV-файлам
 
         self.create_widgets()
         self.setup_logger_redirect()
         self.load_config()
         self.root.protocol("WM_DELETE_WINDOW", self.on_closing)
-        ctk.set_appearance_mode("dark")  # Устанавливаем тёмную тему
-        print(f"Текущая тема: {ctk.get_appearance_mode()}")  # Отладочный вывод
-        self.bind_shortcuts()  # Привязываем горячие клавиши
+        ctk.set_appearance_mode("dark")
+        print(f"Текущая тема: {ctk.get_appearance_mode()}")
+        self.bind_shortcuts()
 
     def create_widgets(self):
-        main_frame = ctk.CTkFrame(self.root, fg_color="#1A1A1A")  # Тёмный фон
+        main_frame = ctk.CTkFrame(self.root, fg_color="#1A1A1A")
         main_frame.pack(padx=5, pady=5, fill="both", expand=True)
 
-        # Создаём вкладки с помощью CTkTabview
         self.tabview = ctk.CTkTabview(main_frame, width=880, height=650, fg_color="#2C2C2C", bg_color="#1A1A1A", border_color="#1DA1F2")
         self.tabview.pack(padx=5, pady=5, fill="both", expand=True)
-        self.tabview.add("Парсер отзывов")  # Текущая вкладка для парсинга
-        self.tabview.add("Анализ слов")    # Новая вкладка для анализа
+        self.tabview.add("Парсер отзывов")
+        self.tabview.add("Анализ слов")
+        self.tabview.add("Детальный анализ предложений")
 
         # Вкладка "Парсер отзывов"
         parser_tab = self.tabview.tab("Парсер отзывов")
         
-        # Рамка для ссылок
         links_frame = ctk.CTkFrame(parser_tab, fg_color="#2C2C2C")
         links_frame.pack(fill="x", pady=2, padx=5, expand=False)
         ctk.CTkLabel(links_frame, text="Ссылки на отзывы", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
@@ -71,12 +78,11 @@ class ParserApp:
         for site in SITE_NAMES:
             site_frame = ctk.CTkFrame(links_frame, fg_color="#2C2C2C")
             site_frame.pack(fill="x", pady=2, padx=5)
-            site_frame.grid_columnconfigure(1, weight=1)  # Делаем колонку с полем ввода расширяемой
+            site_frame.grid_columnconfigure(1, weight=1)
             ctk.CTkLabel(site_frame, text=SITE_NAMES[site], font=("Arial", 12), text_color="white").grid(row=0, column=0, padx=5, pady=5, sticky="w")
             ctk.CTkEntry(site_frame, textvariable=self.site_links[site], width=600, height=30, font=("Arial", 12), fg_color="#3A3A3A", border_color="#1DA1F2", corner_radius=10).grid(row=0, column=1, padx=5, pady=5, sticky="ew")
             ctk.CTkButton(site_frame, text="Добавить", command=lambda s=site: self.add_link(s), fg_color="#1DA1F2", hover_color="#166AB1", width=80, height=30, font=("Arial", 12), corner_radius=10).grid(row=0, column=2, padx=5, pady=5, sticky="e")
 
-        # Рамка для папки сохранения
         output_frame = ctk.CTkFrame(parser_tab, fg_color="#2C2C2C")
         output_frame.pack(fill="x", pady=2, padx=5, expand=False)
         ctk.CTkLabel(output_frame, text="Папка сохранения", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
@@ -85,7 +91,6 @@ class ParserApp:
         ctk.CTkEntry(inner_frame, textvariable=self.output_dir, width=600, height=30, font=("Arial", 12), fg_color="#3A3A3A", border_color="#1DA1F2", corner_radius=10).pack(side="left", fill="x", expand=True, padx=5)
         ctk.CTkButton(inner_frame, text="Обзор...", command=self.select_output_dir, fg_color="#1DA1F2", hover_color="#166AB1", width=80, height=30, font=("Arial", 12), corner_radius=10).pack(side="right", padx=5)
 
-        # Рамка для лога
         log_frame = ctk.CTkFrame(parser_tab, fg_color="#2C2C2C")
         log_frame.pack(fill="both", expand=True, pady=2, padx=5)
         ctk.CTkLabel(log_frame, text="Лог выполнения", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
@@ -95,7 +100,6 @@ class ParserApp:
         self.log_text.pack(side="left", fill="both", expand=True, padx=5)
         scrollbar.pack(side="right", fill="y")
 
-        # Рамка для управления
         control_frame = ctk.CTkFrame(parser_tab, fg_color="#1A1A1A")
         control_frame.pack(fill="x", pady=5, padx=5, expand=False)
         self.start_btn = ctk.CTkButton(control_frame, text="Старт", command=self.toggle_parsing, fg_color="#1DA1F2", hover_color="#166AB1", width=80, height=30, font=("Arial", 12), corner_radius=10)
@@ -109,68 +113,66 @@ class ParserApp:
         # Вкладка "Анализ слов"
         analysis_tab = self.tabview.tab("Анализ слов")
 
-        # Рамка для выбора файлов
         file_frame = ctk.CTkFrame(analysis_tab, fg_color="#2C2C2C")
         file_frame.pack(fill="x", pady=2, padx=5, expand=False)
         ctk.CTkLabel(file_frame, text="Выбор CSV-файлов для анализа", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
+        ctk.CTkCheckBox(file_frame, text="Использовать предобработку текста (исправление опечаток)", variable=self.use_preprocessing, font=("Arial", 12), text_color="white").pack(anchor="w", padx=5, pady=2)
         ctk.CTkButton(file_frame, text="Выбрать файлы для анализа по сайтам", command=self.select_files_for_analysis_by_site, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
         ctk.CTkButton(file_frame, text="Агрегированный анализ выбранных файлов", command=self.select_files_for_aggregated_analysis, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
+        ctk.CTkButton(file_frame, text="Детальный анализ предложений", command=self.select_files_for_detailed_analysis, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
+        ctk.CTkButton(file_frame, text="Сохранить таблицу в Excel", command=self.save_table_to_excel, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
+        ctk.CTkButton(file_frame, text="Визуализировать результаты", command=self.visualize_results, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
 
-        # Рамка для таблицы результатов
         result_frame = ctk.CTkFrame(analysis_tab, fg_color="#2C2C2C")
         result_frame.pack(fill="both", expand=True, pady=5, padx=5)
         ctk.CTkLabel(result_frame, text="Результаты анализа", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
 
-        # Создаём контейнер для Treeview с тёмным фоном
         tree_frame = ctk.CTkFrame(result_frame, fg_color="#333333")
         tree_frame.pack(fill="both", expand=True)
 
-        # Настройка стиля для таблицы
         style = ttk.Style()
-        style.theme_use("clam")  # Используем тему 'clam' для полной настройки стилей
+        style.theme_use("clam")
         style.configure("Custom.Treeview",
                         background="#333333",
                         foreground="#FFFFFF",
                         fieldbackground="#333333",
-                        rowheight=50)
+                        rowheight=150,
+                        font=("Arial", 12))
         style.configure("Custom.Treeview.Heading",
                         background="#444444",
-                        foreground="#FFFFFF")
+                        foreground="#FFFFFF",
+                        font=("Arial", 12, "bold"))
         style.map("Custom.Treeview",
                   background=[("selected", "#1DA1F2")],
                   foreground=[("selected", "#FFFFFF")])
 
-        # Создание таблицы
-        self.result_tree = ttk.Treeview(tree_frame, columns=("Category", "Pros", "Cons", "PositiveKeywords", "NegativeKeywords", "CommonKeywords"), show="headings", height=10, style="Custom.Treeview")
+        self.result_tree = ttk.Treeview(tree_frame, columns=("Category", "Pros", "Cons", "PositiveKeywords", "NegativeKeywords", "CommonKeywords", "PositiveReviews", "NegativeReviews"), show="headings", style="Custom.Treeview")
         self.result_tree.heading("Category", text="Категория")
         self.result_tree.heading("Pros", text="Плюсы")
         self.result_tree.heading("Cons", text="Минусы")
         self.result_tree.heading("PositiveKeywords", text="Ключевые слова (положительные)")
         self.result_tree.heading("NegativeKeywords", text="Ключевые слова (отрицательные)")
         self.result_tree.heading("CommonKeywords", text="Общие ключевые слова")
+        self.result_tree.heading("PositiveReviews", text="Положительные отзывы")
+        self.result_tree.heading("NegativeReviews", text="Отрицательные отзывы")
 
-        # Установка ширины столбцов
         self.result_tree.column("Category", width=150, anchor="w")
         self.result_tree.column("Pros", width=250, anchor="w")
         self.result_tree.column("Cons", width=250, anchor="w")
         self.result_tree.column("PositiveKeywords", width=300, anchor="w")
         self.result_tree.column("NegativeKeywords", width=300, anchor="w")
         self.result_tree.column("CommonKeywords", width=300, anchor="w")
+        self.result_tree.column("PositiveReviews", width=100, anchor="w")
+        self.result_tree.column("NegativeReviews", width=100, anchor="w")
 
-        self.result_tree.pack(fill="both", expand=True)
-
-        # Стиль скроллбара
         style.configure("Custom.Vertical.TScrollbar",
-                        troughcolor="#1E1E1E",          # Тёмно-серый фон дорожки
-                        background="#1DA1F2",           # Ярко-синий для ручки
-                        arrowcolor="#FFFFFF")           # Белый цвет стрелок
-
-        # Вертикальный скроллбар
+                        troughcolor="#1E1E1E",
+                        background="#1DA1F2",
+                        arrowcolor="#FFFFFF")
         v_scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', style="Custom.Vertical.TScrollbar", command=self.result_tree.yview)
         v_scrollbar.pack(side="right", fill="y")
         self.result_tree.configure(yscrollcommand=v_scrollbar.set)
 
-        # Горизонтальный скроллбар (опционально, если строки слишком длинные)
         style.configure("Custom.Horizontal.TScrollbar",
                         troughcolor="#1E1E1E",
                         background="#1DA1F2",
@@ -179,7 +181,249 @@ class ParserApp:
         h_scrollbar.pack(side="bottom", fill="x")
         self.result_tree.configure(xscrollcommand=h_scrollbar.set)
 
-        # ... (остальной код остаётся без изменений) ...
+        self.result_tree.pack(fill="both", expand=True)
+
+        # Вкладка "Детальный анализ предложений"
+        detailed_tab = self.tabview.tab("Детальный анализ предложений")
+
+        detailed_frame = ctk.CTkFrame(detailed_tab, fg_color="#2C2C2C")
+        detailed_frame.pack(fill="both", expand=True, pady=5, padx=5)
+        ctk.CTkLabel(detailed_frame, text="Детальный анализ предложений", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
+
+        # Кнопка для сохранения и прогресс-бар
+        button_frame = ctk.CTkFrame(detailed_frame, fg_color="#2C2C2C")
+        button_frame.pack(fill="x", pady=5, padx=5)
+        ctk.CTkButton(button_frame, text="Сохранить детальный анализ в Excel", command=self.save_detailed_table_to_excel, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(side="left", padx=5)
+        self.progress_detailed = ctk.CTkProgressBar(button_frame, mode="determinate", width=250, height=20, progress_color="#1DA1F2", fg_color="#4A4A4A")
+        self.progress_detailed.pack(side="right", padx=5)
+        self.progress_detailed.set(0)
+
+        # Таблица для отображения предложений
+        tree_frame = ctk.CTkFrame(detailed_frame, fg_color="#333333")
+        tree_frame.pack(fill="both", expand=True)
+
+        self.detailed_tree = ttk.Treeview(tree_frame, columns=("Sentence", "Sentiment", "Score", "Aspects"), show="headings", style="Custom.Treeview")
+        self.detailed_tree.heading("Sentence", text="Предложение")
+        self.detailed_tree.heading("Sentiment", text="Тональность")
+        self.detailed_tree.heading("Score", text="Скор")
+        self.detailed_tree.heading("Aspects", text="Аспекты")
+
+        self.detailed_tree.column("Sentence", width=300, anchor="w")
+        self.detailed_tree.column("Sentiment", width=100, anchor="w")
+        self.detailed_tree.column("Score", width=100, anchor="w")
+        self.detailed_tree.column("Aspects", width=400, anchor="w")
+
+        v_scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', style="Custom.Vertical.TScrollbar", command=self.detailed_tree.yview)
+        v_scrollbar.pack(side="right", fill="y")
+        self.detailed_tree.configure(yscrollcommand=v_scrollbar.set)
+
+        h_scrollbar = ttk.Scrollbar(tree_frame, orient='horizontal', style="Custom.Horizontal.TScrollbar", command=self.detailed_tree.xview)
+        h_scrollbar.pack(side="bottom", fill="x")
+        self.detailed_tree.configure(xscrollcommand=h_scrollbar.set)
+
+        self.detailed_tree.pack(fill="both", expand=True)
+
+    def save_table_to_excel(self):
+        """Сохраняет данные из таблицы result_tree в файл Excel с настройкой формата."""
+        columns = ["Категория", "Плюсы", "Минусы", "Ключевые слова (положительные)", "Ключевые слова (отрицательные)", "Общие ключевые слова", "Положительные отзывы", "Отрицательные отзывы"]
+        data = []
+
+        for item in self.result_tree.get_children():
+            values = self.result_tree.item(item, "values")
+            data.append(values)
+
+        if not data:
+            self.log("Таблица пуста, нечего сохранять!", is_error=True)
+            return
+
+        df = pd.DataFrame(data, columns=columns)
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            title="Сохранить таблицу как"
+        )
+
+        if not file_path:
+            self.log("Сохранение отменено пользователем.")
+            return
+
+        try:
+            df.to_excel(file_path, index=False, engine='openpyxl')
+            wb = openpyxl.load_workbook(file_path)
+            ws = wb.active
+
+            for col in range(1, len(columns) + 1):
+                column_letter = get_column_letter(col)
+                max_length = 0
+                for row in range(1, ws.max_row + 1):
+                    cell = ws[f"{column_letter}{row}"]
+                    try:
+                        cell.alignment = Alignment(wrap_text=True, vertical='top')
+                        cell_value = str(cell.value)
+                        max_length = max(max_length, len(cell_value))
+                    except:
+                        pass
+                adjusted_width = max_length + 5
+                ws.column_dimensions[column_letter].width = adjusted_width
+
+            wb.save(file_path)
+            self.log(f"Таблица успешно сохранена в {file_path}")
+            messagebox.showinfo("Успех", f"Таблица сохранена в {file_path}")
+        except Exception as e:
+            self.log(f"Ошибка при сохранении таблицы в Excel: {str(e)}", is_error=True)
+            messagebox.showerror("Ошибка", f"Не удалось сохранить таблицу: {str(e)}")
+
+    def save_detailed_table_to_excel(self):
+        """Сохраняет данные из таблицы detailed_tree в файл Excel с настройкой формата."""
+        columns = ["Предложение", "Тональность", "Скор", "Аспекты"]
+        data = []
+
+        for item in self.detailed_tree.get_children():
+            values = self.detailed_tree.item(item, "values")
+            data.append(values)
+
+        if not data:
+            self.log("Таблица детального анализа пуста, нечего сохранять!", is_error=True)
+            return
+
+        df = pd.DataFrame(data, columns=columns)
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            title="Сохранить детальный анализ как"
+        )
+
+        if not file_path:
+            self.log("Сохранение отменено пользователем.")
+            return
+
+        try:
+            df.to_excel(file_path, index=False, engine='openpyxl')
+            wb = openpyxl.load_workbook(file_path)
+            ws = wb.active
+
+            for col in range(1, len(columns) + 1):
+                column_letter = get_column_letter(col)
+                max_length = 0
+                for row in range(1, ws.max_row + 1):
+                    cell = ws[f"{column_letter}{row}"]
+                    try:
+                        cell.alignment = Alignment(wrap_text=True, vertical='top')
+                        cell_value = str(cell.value)
+                        max_length = max(max_length, len(cell_value))
+                    except:
+                        pass
+                adjusted_width = max_length + 5
+                ws.column_dimensions[column_letter].width = adjusted_width
+
+            wb.save(file_path)
+            self.log(f"Детальный анализ успешно сохранён в {file_path}")
+            messagebox.showinfo("Успех", f"Детальный анализ сохранён в {file_path}")
+        except Exception as e:
+            self.log(f"Ошибка при сохранении детального анализа в Excel: {str(e)}", is_error=True)
+            messagebox.showerror("Ошибка", f"Не удалось сохранить детальный анализ: {str(e)}")
+
+    def visualize_results(self):
+        """Визуализирует результаты анализа слов в виде гистограммы ключевых слов."""
+        if not self.csv_files:  # Проверяем, выбраны ли CSV-файлы
+            self.log("Не выбраны CSV-файлы для анализа, нечего визуализировать!", is_error=True)
+            return
+
+        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+        
+        # Собираем все отзывы из CSV-файлов
+        all_reviews = []
+        for csv_file in self.csv_files:
+            try:
+                df = pd.read_csv(csv_file, encoding='utf-8')
+                if 'Текст отзыва' in df.columns:
+                    reviews = df['Текст отзыва'].dropna().tolist()
+                    all_reviews.extend(reviews)
+                elif 'Достоинства' in df.columns and 'Недостатки' in df.columns:
+                    pros_reviews = df['Достоинства'].dropna().tolist()
+                    cons_reviews = df['Недостатки'].dropna().tolist()
+                    all_reviews.extend(pros_reviews + cons_reviews)
+                else:
+                    self.log(f"CSV-файл {csv_file} не содержит подходящих столбцов для анализа!", is_error=True)
+                    continue
+            except Exception as e:
+                self.log(f"Ошибка при чтении файла {csv_file}: {str(e)}", is_error=True)
+                continue
+
+        if not all_reviews:
+            self.log("Нет отзывов для визуализации!", is_error=True)
+            return
+
+        # Обрабатываем отзывы и собираем аспекты
+        positive_keywords = []
+        negative_keywords = []
+        keyword_review_count = Counter()  # Для подсчёта, в скольки отзывах встречается ключевое слово
+
+        for review in all_reviews:
+            sentences = analyzer.analyze_review_sentences(review)
+            review_pos_keywords = set()
+            review_neg_keywords = set()
+            for sentence, sentiment, _, aspects in sentences:
+                for aspect_phrase, aspect_sentiment, _ in aspects:
+                    if aspect_phrase.lower() in analyzer.invalid_phrases:
+                        continue
+                    if aspect_sentiment == "положительное":
+                        positive_keywords.append(aspect_phrase)
+                        review_pos_keywords.add(aspect_phrase)
+                    elif aspect_sentiment == "отрицательное":
+                        negative_keywords.append(aspect_phrase)
+                        review_neg_keywords.add(aspect_phrase)
+            # Увеличиваем счётчик для каждого ключевого слова в этом отзыве
+            for keyword in review_pos_keywords:
+                keyword_review_count[keyword] += 1
+            for keyword in review_neg_keywords:
+                keyword_review_count[keyword] += 1
+
+        # Подсчитываем частотность ключевых слов
+        pos_keyword_counts = Counter(positive_keywords)
+        neg_keyword_counts = Counter(negative_keywords)
+
+        # Фильтруем ключевые слова: оставляем только те, которые встречаются в более чем одном отзыве
+        MIN_REVIEW_THRESHOLD = 2  # Минимальное количество отзывов, в которых должно встречаться слово
+        filtered_pos_keywords = {k: v for k, v in pos_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
+        filtered_neg_keywords = {k: v for k, v in neg_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
+
+        # Подготовка данных для гистограммы
+        top_pos_keywords = dict(sorted(filtered_pos_keywords.items(), key=lambda x: x[1], reverse=True)[:10])
+        top_neg_keywords = dict(sorted(filtered_neg_keywords.items(), key=lambda x: x[1], reverse=True)[:10])
+
+        # Создаём гистограмму
+        plt.figure(figsize=(12, 6))
+
+        # Положительные ключевые слова
+        if top_pos_keywords:
+            plt.subplot(1, 2, 1)
+            bars = plt.barh(list(top_pos_keywords.keys()), list(top_pos_keywords.values()), color='green')
+            plt.title("Топ-10 положительных ключевых слов")
+            plt.xlabel("Частота")
+            plt.gca().invert_yaxis()
+            # Добавляем подписи к столбцам
+            for bar in bars:
+                width = bar.get_width()
+                plt.text(width, bar.get_y() + bar.get_height()/2, f'{int(width)}', ha='left', va='center')
+
+        # Отрицательные ключевые слова
+        if top_neg_keywords:
+            plt.subplot(1, 2, 2)
+            bars = plt.barh(list(top_neg_keywords.keys()), list(top_neg_keywords.values()), color='red')
+            plt.title("Топ-10 отрицательных ключевых слов")
+            plt.xlabel("Частота")
+            plt.gca().invert_yaxis()
+            # Добавляем подписи к столбцам
+            for bar in bars:
+                width = bar.get_width()
+                plt.text(width, bar.get_y() + bar.get_height()/2, f'{int(width)}', ha='left', va='center')
+
+        plt.tight_layout()
+        plt.show()
+        self.log("Визуализация результатов завершена!")
 
     def log(self, message, is_error=False):
         self.log_text.configure(state="normal")
@@ -248,7 +492,6 @@ class ParserApp:
         }.items() if (link := self.site_links[site].get())]
 
         total_steps = len(parsers)
-        saved_files = []
 
         def run_parser(name, parser, link):
             if not self.running:
@@ -256,7 +499,7 @@ class ParserApp:
             try:
                 self.log(f"Запуск парсера: {name}")
                 parser.parse(link, output_dir=self.output_dir.get())
-                self.log(f"Парсер {name} завершен")
+                self.log(f"Парсер {name} завершён")
             except Exception as e:
                 self.log(f"Ошибка при работе с {name}: {str(e)}", is_error=True)
 
@@ -270,7 +513,7 @@ class ParserApp:
         self.running = False
         self.progress.set(0)
         self.start_btn.configure(text="Старт")
-        messagebox.showinfo("Информация", "Парсинг завершен!")
+        messagebox.showinfo("Информация", "Парсинг завершён!")
 
     def select_files_for_analysis_by_site(self):
         """Выбор CSV-файлов для анализа отзывов по сайтам и отображение результатов в таблице."""
@@ -279,31 +522,40 @@ class ParserApp:
             self.log("Не выбраны CSV-файлы для анализа!", is_error=True)
             return
 
-        analyzer = ReviewAnalyzer()
-        self.result_tree.delete(*self.result_tree.get_children())  # Очистка предыдущих данных
-        for csv_file in csv_files:
+        # Сохраняем выбранные файлы для последующей визуализации
+        self.csv_files = list(csv_files)
+
+        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+        self.result_tree.delete(*self.result_tree.get_children())
+        total_files = len(csv_files)
+        for i, csv_file in enumerate(csv_files):
             try:
-                # Извлекаем имя сайта из имени файла, используя SITE_NAMES
                 site_name = self.get_site_name_from_filename(csv_file)
                 if not site_name:
                     self.log(f"Не удалось определить сайт для файла {csv_file}", is_error=True)
                     continue
+                self.log(f"Анализируем файл: {csv_file}")
                 results = analyzer.analyze_reviews(csv_file)
-                # Применяем перенос текста для каждого значения
                 self.result_tree.insert("", "end", values=(
                     site_name,
-                    self.wrap_text(results["Плюсы"]),
-                    self.wrap_text(results["Минусы"]),
-                    self.wrap_text(results["Ключевые слова (положительные)"]),
-                    self.wrap_text(results["Ключевые слова (отрицательные)"]),
-                    self.wrap_text(results["Общие ключевые слова"])
+                    results["Плюсы"],
+                    results["Минусы"],
+                    results["Ключевые слова (положительные)"],
+                    results["Ключевые слова (отрицательные)"],
+                    results["Общие ключевые слова"],
+                    results["Положительные отзывы"],
+                    results["Отрицательные отзывы"]
                 ))
+                progress = (i + 1) / total_files * 100
+                self.progress.set(progress)
+                self.root.update_idletasks()
             except Exception as e:
                 self.log(f"Ошибка при анализе файла {csv_file}: {str(e)}", is_error=True)
                 continue
 
+        self.progress.set(0)
         self.log("Анализ отзывов по сайтам завершён!")
-        self.tabview.set("Анализ слов")  # Переключаемся на вкладку анализа после анализа
+        self.tabview.set("Анализ слов")
 
     def select_files_for_aggregated_analysis(self):
         """Выбор CSV-файлов для агрегированного анализа отзывов и отображение результатов в таблице."""
@@ -312,20 +564,77 @@ class ParserApp:
             self.log("Не выбраны CSV-файлы для анализа!", is_error=True)
             return
 
-        analyzer = ReviewAnalyzer()
-        self.result_tree.delete(*self.result_tree.get_children())  # Очистка предыдущих данных
+        # Сохраняем выбранные файлы для последующей визуализации
+        self.csv_files = list(csv_files)
+
+        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+        self.result_tree.delete(*self.result_tree.get_children())
+        self.log(f"Анализируем файлы: {', '.join(csv_files)}")
         aggregated_results = analyzer.aggregate_reviews(csv_files)
         for key, value in aggregated_results.items():
-            self.result_tree.insert("", "end", values=(key, self.wrap_text(value), "", "", "", ""))
-
+            self.result_tree.insert("", "end", values=(
+                key,
+                value if key == "Плюсы (все сайты)" else "",
+                value if key == "Минусы (все сайты)" else "",
+                value if key == "Ключевые слова (положительные, все сайты)" else "",
+                value if key == "Ключевые слова (отрицательные, все сайты)" else "",
+                value if key == "Общие ключевые слова (все сайты)" else "",
+                value if key == "Положительные отзывы (все сайты)" else "",
+                value if key == "Отрицательные отзывы (все сайты)" else ""
+            ))
+        self.progress.set(0)
         self.log("Агрегированный анализ отзывов завершён!")
-        self.tabview.set("Анализ слов")  # Переключаемся на вкладку анализа после анализа
+        self.tabview.set("Анализ слов")
 
-    def wrap_text(self, text):
-        """Оборачивает текст для корректного отображения в таблице с переносами."""
-        if not text:
-            return ""
-        return "\n".join([text[i:i+20] for i in range(0, len(text), 20)])  # Разбиваем текст на части по 20 символов
+    def select_files_for_detailed_analysis(self):
+        """Выбор CSV-файлов для детального анализа предложений."""
+        csv_files = filedialog.askopenfilenames(filetypes=[("CSV files", "*.csv")])
+        if not csv_files:
+            self.log("Не выбраны CSV-файлы для анализа!", is_error=True)
+            return
+        
+        for csv_file in csv_files:
+            self.analyze_sentences_detailed(csv_file)
+
+    def analyze_sentences_detailed(self, csv_file):
+        """Анализирует предложения в отзывах из CSV-файла и отображает результаты."""
+        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+        self.detailed_tree.delete(*self.detailed_tree.get_children())
+        
+        try:
+            df = pd.read_csv(csv_file, encoding='utf-8')
+            if 'Текст отзыва' in df.columns:
+                reviews = df['Текст отзыва'].dropna().tolist()
+            elif 'Достоинства' in df.columns and 'Недостатки' in df.columns:
+                reviews = (df['Достоинства'].dropna().tolist() + 
+                           df['Недостатки'].dropna().tolist())
+            else:
+                self.log("CSV-файл не содержит подходящих столбцов для анализа!", is_error=True)
+                return
+            
+            total_reviews = len(reviews)
+            for i, review in enumerate(reviews):
+                sentences_analysis = analyzer.analyze_review_sentences(review)
+                for sentence, sentiment, score, aspects in sentences_analysis:
+                    aspects_str = "; ".join([f"{aspect}: {sent} ({s:.2f})" for aspect, sent, s in aspects])
+                    self.detailed_tree.insert("", "end", values=(
+                        sentence,
+                        sentiment,
+                        f"{score:.2f}",
+                        aspects_str
+                    ))
+                # Обновляем прогресс
+                progress = (i + 1) / total_reviews * 100
+                self.progress_detailed.set(progress)
+                self.root.update_idletasks()
+            
+            self.progress_detailed.set(0)
+            self.log(f"Детальный анализ предложений для {csv_file} завершён!")
+            self.tabview.set("Детальный анализ предложений")
+        
+        except Exception as e:
+            self.log(f"Ошибка при детальном анализе файла {csv_file}: {str(e)}", is_error=True)
+            self.progress_detailed.set(0)
 
     def get_site_name_from_filename(self, filename):
         """Извлекает имя сайта из имени файла, используя SITE_NAMES."""
@@ -346,22 +655,22 @@ class ParserApp:
 
     def bind_shortcuts(self):
         def handle_ctrl_key(event):
-            if event.state & 0x4:  # Проверка на Ctrl
-                if event.keycode == 67:  # Ctrl + C (копировать)
+            if event.state & 0x4:
+                if event.keycode == 67:  # Ctrl + C
                     event.widget.event_generate("<<Copy>>")
                     return "break"
-                elif event.keycode == 86:  # Ctrl + V (вставить)
+                elif event.keycode == 86:  # Ctrl + V
                     event.widget.event_generate("<<Paste>>")
                     return "break"
-                elif event.keycode == 88:  # Ctrl + X (вырезать)
+                elif event.keycode == 88:  # Ctrl + X
                     event.widget.event_generate("<<Cut>>")
                     return "break"
-                elif event.keycode == 65:  # Ctrl + A (выделить всё)
+                elif event.keycode == 65:  # Ctrl + A
                     self.select_all(event.widget)
                     return "break"
-                elif event.keycode == 90:  # Ctrl + Z (отменить)
+                elif event.keycode == 90:  # Ctrl + Z
                     if isinstance(event.widget, ctk.CTkEntry):
-                        event.widget.delete(0, ctk.END)  # Простое "отменить" — очистка поля
+                        event.widget.delete(0, ctk.END)
                     return "break"
 
         def bind_to_entry(widget):
@@ -398,7 +707,7 @@ class ParserApp:
     def on_closing(self):
         if self.running:
             self.running = False
-            time.sleep(1)  # Даем потокам завершить работу
+            time.sleep(1)
         self.save_config()
         self.root.destroy()
 
