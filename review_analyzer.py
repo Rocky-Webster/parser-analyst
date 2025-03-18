@@ -9,6 +9,7 @@ from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassifica
 import pymorphy3
 from concurrent.futures import ThreadPoolExecutor
 import numpy as np
+from datetime import datetime
 
 # Попытка импорта YandexSpeller с обработкой ошибки
 try:
@@ -18,16 +19,16 @@ except ImportError:
     logging.warning("Модуль pyaspeller недоступен. Предобработка текста будет отключена.")
     speller = None
 
-# Настройка логирования с поддержкой UTF-8
+# Настройка логирования с поддержкой UTF-8 и обработкой эмодзи
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[logging.StreamHandler(sys.stdout)],
-    encoding='utf-8-sig'  # Убедимся, что используется UTF-8
+    encoding='utf-8-sig'
 )
 logger = logging.getLogger(__name__)
 
-# Замена эмодзи и специальных символов для логирования
+# Расширенная замена эмодзи для логирования
 def replace_emoji_for_logging(text: str) -> str:
     emoji_dict = {
         "👍": "[положительный_эмодзи]",
@@ -39,18 +40,22 @@ def replace_emoji_for_logging(text: str) -> str:
         "😡": "[отрицательное_эмоция]",
         "😠": "[отрицательное_эмоция]",
         "😋": "[положительное_эмоция]",
-        "！": "[восклицание]",
-        "‼": "[двойное_восклицание]",
-        "？": "[вопросительный_знак]",
-        "🌻": "[цветок_эмодзи]",
-        "🚘": "[машина_эмодзи]"
+        "！": "восклицание",
+        "‼": "двойное_восклицание",
+        "？": "вопросительный_знак",
+        "🌻": "цветок_эмодзи",
+        "🚘": "машина_эмодзи",
+        "👎": "[отрицательный_эмодзи]",
+        "😞": "[отрицательное_эмоция]",
+        "🤔": "[нейтральное_эмоция]",
+        "💡": "[идея_эмодзи]"
     }
     for emoji, label in emoji_dict.items():
         text = text.replace(emoji, f" {label} ")
-    return text
+    return text.strip()
 
 # Инициализация spaCy для русского языка
-nlp = spacy.load("ru_core_news_sm", disable=["ner", "lemmatizer"])
+nlp = spacy.load("ru_core_news_sm", disable=["ner"])
 
 # Инициализация pymorphy3 для нормализации слов
 morph = pymorphy3.MorphAnalyzer()
@@ -67,7 +72,7 @@ except Exception as e:
     logger.warning(f"Ошибка загрузки модели {model_name}: {e}. Используется словарный анализ.")
     sentiment_analyzer = None
 
-# Расширенный словарь тональности с усилением негативных слов
+# Расширенный словарь тональности
 SENTIMENT_DICT = {
     "хороший": ("положительное", 0.7),
     "отличный": ("положительное", 0.9),
@@ -91,7 +96,7 @@ SENTIMENT_DICT = {
     "невкусный": ("отрицательное", -0.7),
     "сломанный": ("отрицательное", -0.8),
     "грязный": ("отрицательное", -0.7),
-    "дорогой": ("отрицательное", -0.6),
+    "дорогой": ("отрицательное", -0.7),
     "безвкусный": ("отрицательное", -0.7),
     "прогорклый": ("отрицательное", -0.8),
     "протухший": ("отрицательное", -0.9),
@@ -127,14 +132,13 @@ SENTIMENT_DICT = {
     "стыдобень": ("отрицательное", -0.7),
     "недолив": ("отрицательное", -0.8),
     "хамство": ("отрицательное", -0.7),
-    "дорого": ("отрицательное", -0.7),  # Усилен вес
     "дороговато": ("отрицательное", -0.8),
-    "мало": ("отрицательное", -0.6),  # Добавлен вес
-    "маленький": ("отрицательное", -0.5),  # Добавлен вес
-    "маленькие": ("отрицательное", -0.5),
+    "мало": ("отрицательное", -0.6),
+    "маленький": ("отрицательное", -0.5),
     "маловато": ("отрицательное", -0.6),
-    "странный": ("отрицательное", -0.6),  # Для "вкус странный"
-    "плохой": ("отрицательное", -0.7)
+    "странный": ("отрицательное", -0.6),
+    "высокая": ("отрицательное", -0.6),
+    "непонятный": ("отрицательное", -0.6)
 }
 
 class ReviewAnalyzer:
@@ -151,6 +155,7 @@ class ReviewAnalyzer:
         }
         self.sentiment_cache = {}
         self.domain_hints = ["рыба", "мясо", "еда", "экран", "камера", "креветка", "минтай", "гребешок", "вкус", "качество", "размер", "топливо", "сервис", "обслуживание", "персонал", "баллы", "АЗС", "бензин", "дизель", "карта", "цена", "приложение", "состав", "упаковка", "икра"]
+        self.review_data = []  # Для хранения данных отзывов с именами пользователей
 
     def preprocess_text(self, text: str) -> str:
         if not self.use_preprocessing or not text.strip():
@@ -212,7 +217,6 @@ class ReviewAnalyzer:
         return sentences
 
     def split_mixed_sentence(self, sentence: str) -> List[str]:
-        # Разбиение предложений типа "хорошо, но дорого"
         parts = re.split(r'\s+(но|а|или)\s+', sentence.lower())
         if len(parts) > 1:
             return [part.strip() for part in parts if part.strip()]
@@ -262,9 +266,8 @@ class ReviewAnalyzer:
 
                 doc = nlp(text)
                 token_count = len([token for token in doc if not token.is_punct])
-                MIN_CONFIDENCE_THRESHOLD = 0.6  # Уменьшен до 0.6 для большей чувствительности
+                MIN_CONFIDENCE_THRESHOLD = 0.6
 
-                # Проверка на ключевые слова для переопределения neutral
                 has_negative = any(token.lemma_ in [k for k, (s, _) in SENTIMENT_DICT.items() if s == "отрицательное"] for token in doc)
                 has_positive = any(token.lemma_ in [k for k, (s, _) in SENTIMENT_DICT.items() if s == "положительное"] for token in doc)
                 negative_boost = 0
@@ -273,7 +276,7 @@ class ReviewAnalyzer:
                     negative_boost = -0.7 * len(negative_words) * min(abs(SENTIMENT_DICT.get(word, (None, 0.0))[1]) for word in negative_words if SENTIMENT_DICT.get(word, (None, None))[0] == "отрицательное")
                     for i in range(len(negative_words) - 1):
                         if negative_words[i] in ["очень", "мега"] and negative_words[i + 1] in ["мало", "дорого", "маленький"]:
-                            negative_boost *= 1.5  # Усиление комбинаций
+                            negative_boost *= 1.5
 
                 if label == "positive" and score > MIN_CONFIDENCE_THRESHOLD:
                     base_score = score
@@ -302,7 +305,7 @@ class ReviewAnalyzer:
                     combined_score = (score * 0.4) + (abs(fallback_score) * 0.6) * (-1 if fallback_sentiment == "отрицательное" else 1)
                     adjusted_score = combined_score
 
-                sentiment = "положительное" if adjusted_score > 0.4 else "отрицательное" if adjusted_score < -0.4 else "нейтральное"  # Уменьшены пороги
+                sentiment = "положительное" if adjusted_score > 0.4 else "отрицательное" if adjusted_score < -0.4 else "нейтральное"
                 self.sentiment_cache[text] = (sentiment, adjusted_score)
                 return sentiment, adjusted_score
             except Exception as e:
@@ -328,24 +331,21 @@ class ReviewAnalyzer:
         else:
             return "нейтральное", 0.0
 
-    def extract_aspects(self, sentence: str) -> List[Tuple[str, str, float]]:
+    def extract_aspects(self, sentence: str) -> List[Tuple[str, str, float, str]]:
         doc = nlp(sentence)
         aspects = []
         invalid_words = {"оченк", "поробовать", "спасного", "заскучаться", "добовство", "хари"}
+        MAX_ASPECT_LENGTH = 5
 
         if sentence.lower().strip() in ["нет", "нету"]:
             sentiment, score = self.get_sentiment("нет")
-            aspects.append(("нет", sentiment, score))
+            aspects.append(("нет", sentiment, score, sentence))
             logger.info(f"Извлечён аспект 'нет': тональность={sentiment}, скор={score}")
             return aspects
 
         sentiment, score = self.analyze_sentiment_transformers(sentence)
-
-        # Ограничение длины аспекта
-        MAX_ASPECT_LENGTH = 4
-
-        # Разбиение смешанных предложений
         clauses = self.split_mixed_sentence(sentence)
+
         for clause in clauses:
             doc_clause = nlp(clause)
             for token in doc_clause:
@@ -355,15 +355,26 @@ class ReviewAnalyzer:
                     modifiers = []
                     negation = False
                     children_count = 0
+                    related_tokens = []
 
+                    # Собираем связанные токены (модификаторы и зависимые слова)
                     for child in token.children:
-                        if child.dep_ in ["amod", "compound", "advmod"] and child.lemma_ not in invalid_words and children_count < MAX_ASPECT_LENGTH - 1:
+                        if child.dep_ in ["amod", "compound", "advmod", "nmod", "obj"] and child.lemma_ not in invalid_words and children_count < MAX_ASPECT_LENGTH - 1:
                             modifiers.append(child.lemma_)
+                            related_tokens.append(child)
                             children_count += 1
                         if child.lemma_ in ["не", "нет", "ни", "едва"] and child.dep_ in ["neg"]:
                             negation = True
 
-                    aspect_phrase = " ".join(modifiers + [aspect_phrase]).strip()
+                    # Если токен сам является зависимым, добавляем его "родителя"
+                    if token.dep_ in ["amod", "nmod", "obj"]:
+                        parent = token.head
+                        if parent.pos_ in ["NOUN", "VERB"] and parent.lemma_ not in invalid_words:
+                            modifiers.append(parent.lemma_)
+                            related_tokens.append(parent)
+
+                    # Формируем аспект из связанных токенов
+                    aspect_phrase = " ".join([mod for mod in modifiers if mod] + [token.lemma_]).strip()
                     if not aspect_phrase or aspect_phrase.lower() in self.invalid_phrases or len(aspect_phrase.split()) > MAX_ASPECT_LENGTH:
                         continue
 
@@ -373,38 +384,45 @@ class ReviewAnalyzer:
                     if negation or any(mod in [k for k, (s, _) in SENTIMENT_DICT.items() if s == "отрицательное"] for mod in modifiers):
                         aspect_sentiment = "отрицательное"
                         aspect_score = -abs(aspect_score) if aspect_score > 0 else aspect_score
+                    elif any(mod in [k for k, (s, _) in SENTIMENT_DICT.items() if s == "положительное"] for mod in modifiers):
+                        aspect_sentiment = "положительное"
+                        aspect_score = abs(aspect_score)
 
-                    aspects.append((aspect_phrase, aspect_sentiment, aspect_score))
-                    logger.info(f"Извлечён аспект: '{replace_emoji_for_logging(aspect_phrase)}', тональность: {aspect_sentiment}, скор: {aspect_score}")
+                    aspects.append((aspect_phrase, aspect_sentiment, aspect_score, clause))
+                    logger.info(f"Извлечён аспект: '{replace_emoji_for_logging(aspect_phrase)}', тональность: {aspect_sentiment}, скор: {aspect_score}, из текста: '{clause}'")
 
             if not aspects and sentiment != "нейтральное" and len(sentence.split()) <= MAX_ASPECT_LENGTH:
-                aspects.append((sentence.strip(), sentiment, score))
+                aspects.append((sentence.strip(), sentiment, score, sentence))
                 logger.info(f"Извлечён аспект (из всего предложения): '{replace_emoji_for_logging(sentence.strip())}', тональность: {sentiment}, скор: {score}")
 
         return aspects
 
-    def analyze_review_sentences(self, review_text: str) -> List[Tuple[str, str, float, List[Tuple[str, str, float]]]]:
+    def analyze_review_sentences(self, review_text: str) -> List[Tuple[str, str, float, List[Tuple[str, str, float, str]]]]:
         review_text = self.preprocess_text(review_text)
         sentences = self.split_sentences(review_text)
         result = []
         for sentence in sentences:
-            doc = nlp(sentence)
-            clauses = []
-            current_clause = []
-            for token in doc:
-                current_clause.append(token.text)
-                if token.dep_ in ["cc", "punct"] and token.lemma_ in ["и", "но", "а", "или", ","]:
-                    if current_clause:
-                        clauses.append(" ".join(current_clause).strip())
-                        current_clause = []
-            if current_clause:
-                clauses.append(" ".join(current_clause).strip())
+            try:
+                doc = nlp(sentence)
+                clauses = []
+                current_clause = []
+                for token in doc:
+                    current_clause.append(token.text)
+                    if token.dep_ in ["cc", "punct"] and token.lemma_ in ["и", "но", "а", "или", ","]:
+                        if current_clause:
+                            clauses.append(" ".join(current_clause).strip())
+                            current_clause = []
+                if current_clause:
+                    clauses.append(" ".join(current_clause).strip())
 
-            for clause in clauses:
-                sentiment, score = self.analyze_sentiment_transformers(clause)
-                aspects = self.extract_aspects(clause)
-                result.append((clause, sentiment, score, aspects))
-                logger.info(f"Анализ предложения '{replace_emoji_for_logging(clause)}': тональность={sentiment}, скор={score}, аспекты={aspects}")
+                for clause in clauses:
+                    sentiment, score = self.analyze_sentiment_transformers(clause)
+                    aspects = self.extract_aspects(clause)
+                    result.append((clause, sentiment, score, aspects))
+                    logger.info(f"Анализ предложения '{replace_emoji_for_logging(clause)}': тональность={sentiment}, скор={score}, аспекты={aspects}")
+            except Exception as e:
+                logger.error(f"Ошибка при анализе предложения '{replace_emoji_for_logging(sentence)}': {str(e)}")
+                result.append((sentence, "нейтральное", 0.0, []))
         return result
 
     def analyze_reviews(self, csv_path: str) -> Dict[str, str]:
@@ -412,18 +430,29 @@ class ReviewAnalyzer:
             df = pd.read_csv(csv_path, encoding='utf-8')
             positive_count = 0
             negative_count = 0
+            neutral_count = 0  # Добавляем счётчик нейтральных отзывов
             positive_aspects = Counter()
             negative_aspects = Counter()
             self.positive_keywords.clear()
             self.negative_keywords.clear()
+            self.review_data = []  # Очищаем данные отзывов
             processed_texts_set = set()
 
             if all(col in df.columns for col in ['Достоинства', 'Недостатки', 'Оценка']):
                 texts = [(str(row['Достоинства']) if pd.notna(row['Достоинства']) else "",
                          str(row['Недостатки']) if pd.notna(row['Недостатки']) else "",
-                         int(row['Оценка']) if pd.notna(row['Оценка']) else 3)
+                         int(row['Оценка']) if pd.notna(row['Оценка']) else 3,
+                         str(row.get('Имя пользователя', 'Аноним')))
                         for _, row in df.iterrows()]
-                for pros_text, cons_text, rating in texts:
+                for pros_text, cons_text, rating, username in texts:
+                    self.review_data.append({
+                        'username': username,
+                        'pros': pros_text,
+                        'cons': cons_text,
+                        'rating': rating,
+                        'original_pros': pros_text,  # Сохраняем оригинальный текст для поиска примеров
+                        'original_cons': cons_text
+                    })
                     if pros_text.strip():
                         if pros_text.strip().lower() in ["нет", "нету"]:
                             negative_aspects["нет"] += 1
@@ -433,7 +462,7 @@ class ReviewAnalyzer:
                             pros_sentences = self.analyze_review_sentences(pros_text)
                             for _, sentiment, _, aspects in pros_sentences:
                                 if sentiment == "положительное":
-                                    for aspect_phrase, aspect_sentiment, _ in aspects:
+                                    for aspect_phrase, aspect_sentiment, _, _ in aspects:
                                         if aspect_sentiment == "положительное":
                                             positive_aspects[aspect_phrase] += 1
                                             self.positive_keywords.add(aspect_phrase)
@@ -441,7 +470,7 @@ class ReviewAnalyzer:
                                             negative_aspects[aspect_phrase] += 1
                                             self.negative_keywords.add(aspect_phrase)
                                 elif sentiment == "отрицательное":
-                                    for aspect_phrase, aspect_sentiment, _ in aspects:
+                                    for aspect_phrase, aspect_sentiment, _, _ in aspects:
                                         if aspect_sentiment == "отрицательное":
                                             negative_aspects[aspect_phrase] += 1
                                             self.negative_keywords.add(aspect_phrase)
@@ -454,12 +483,12 @@ class ReviewAnalyzer:
                             cons_sentences = self.analyze_review_sentences(cons_text)
                             for _, sentiment, _, aspects in cons_sentences:
                                 if sentiment == "положительное":
-                                    for aspect_phrase, aspect_sentiment, _ in aspects:
+                                    for aspect_phrase, aspect_sentiment, _, _ in aspects:
                                         if aspect_sentiment == "положительное":
                                             positive_aspects[aspect_phrase] += 1
                                             self.positive_keywords.add(aspect_phrase)
                                 elif sentiment == "отрицательное":
-                                    for aspect_phrase, aspect_sentiment, _ in aspects:
+                                    for aspect_phrase, aspect_sentiment, _, _ in aspects:
                                         if aspect_sentiment == "отрицательное":
                                             negative_aspects[aspect_phrase] += 1
                                             self.negative_keywords.add(aspect_phrase)
@@ -467,22 +496,33 @@ class ReviewAnalyzer:
                         positive_count += 1
                     elif rating <= self.negative_threshold:
                         negative_count += 1
+                    else:
+                        neutral_count += 1
 
             elif all(col in df.columns for col in ['Текст отзыва', 'Оценка']):
-                texts = [(str(row['Текст отзыва']), int(row['Оценка']) if pd.notna(row['Оценка']) else 3)
+                texts = [(str(row['Текст отзыва']), int(row['Оценка']) if pd.notna(row['Оценка']) else 3,
+                         str(row.get('Имя пользователя', 'Аноним')))
                         for _, row in df.iterrows()]
-                for text, rating in texts:
+                for text, rating, username in texts:
+                    self.review_data.append({
+                        'username': username,
+                        'pros': text,
+                        'cons': '',
+                        'rating': rating,
+                        'original_pros': text,  # Сохраняем оригинальный текст
+                        'original_cons': ''
+                    })
                     if text.strip():
                         processed_texts_set.add(text)
                         sentences = self.analyze_review_sentences(text)
                         for _, sentiment, _, aspects in sentences:
                             if sentiment == "положительное":
-                                for aspect_phrase, aspect_sentiment, _ in aspects:
+                                for aspect_phrase, aspect_sentiment, _, _ in aspects:
                                     if aspect_sentiment == "положительное":
                                         positive_aspects[aspect_phrase] += 1
                                         self.positive_keywords.add(aspect_phrase)
                             elif sentiment == "отрицательное":
-                                for aspect_phrase, aspect_sentiment, _ in aspects:
+                                for aspect_phrase, aspect_sentiment, _, _ in aspects:
                                     if aspect_sentiment == "отрицательное":
                                         negative_aspects[aspect_phrase] += 1
                                         self.negative_keywords.add(aspect_phrase)
@@ -490,6 +530,8 @@ class ReviewAnalyzer:
                         positive_count += 1
                     elif rating <= self.negative_threshold:
                         negative_count += 1
+                    else:
+                        neutral_count += 1
 
             else:
                 raise ValueError("CSV-файл должен содержать либо столбцы 'Достоинства', 'Недостатки' и 'Оценка', либо 'Текст отзыва' и 'Оценка'")
@@ -523,7 +565,10 @@ class ReviewAnalyzer:
                 "Ключевые слова (отрицательные)": ", ".join(sorted(self.negative_keywords)[:10]),
                 "Общие ключевые слова": ", ".join(sorted(set(self.positive_keywords).union(self.negative_keywords))[:15]),
                 "Положительные отзывы": str(positive_count),
-                "Отрицательные отзывы": str(negative_count)
+                "Отрицательные отзывы": str(negative_count),
+                "Нейтральные отзывы": str(neutral_count),  # Добавляем нейтральные отзывы
+                "positive_aspects": positive_aspects,
+                "negative_aspects": negative_aspects
             }
         except UnicodeDecodeError as e:
             logger.error(f"Ошибка кодировки при чтении файла {csv_path}: {str(e)}")
@@ -534,7 +579,10 @@ class ReviewAnalyzer:
                 "Ключевые слова (отрицательные)": "Ошибка кодировки",
                 "Общие ключевые слова": "Ошибка кодировки",
                 "Положительные отзывы": "Ошибка кодировки",
-                "Отрицательные отзывы": "Ошибка кодировки"
+                "Отрицательные отзывы": "Ошибка кодировки",
+                "Нейтральные отзывы": "Ошибка кодировки",
+                "positive_aspects": Counter(),
+                "negative_aspects": Counter()
             }
         except Exception as e:
             logger.error(f"Ошибка при анализе файла {csv_path}: {str(e)}")
@@ -545,38 +593,36 @@ class ReviewAnalyzer:
                 "Ключевые слова (отрицательные)": "Ошибка",
                 "Общие ключевые слова": "Ошибка",
                 "Положительные отзывы": "Ошибка",
-                "Отрицательные отзывы": "Ошибка"
+                "Отрицательные отзывы": "Ошибка",
+                "Нейтральные отзывы": "Ошибка",
+                "positive_aspects": Counter(),
+                "negative_aspects": Counter()
             }
 
     def aggregate_reviews(self, csv_paths: List[str]) -> Dict[str, str]:
         all_keywords: List[str] = []
         total_positive_count = 0
         total_negative_count = 0
+        total_neutral_count = 0  # Добавляем счётчик нейтральных отзывов
         all_positive_aspects = Counter()
         all_negative_aspects = Counter()
 
         def process_single_file(csv_path):
             return self.analyze_reviews(csv_path)
 
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        with ThreadPoolExecutor(max_workers=8) as executor:
             results = list(executor.map(process_single_file, csv_paths))
 
         for result in results:
             if result["Плюсы"] != "Ошибка" and result["Плюсы"] != "Ошибка кодировки":
                 positive_count = int(result["Положительные отзывы"])
                 negative_count = int(result["Отрицательные отзывы"])
+                neutral_count = int(result["Нейтральные отзывы"])
                 total_positive_count += positive_count
                 total_negative_count += negative_count
-                for line in result["Плюсы"].split("\n"):
-                    if "(" in line:
-                        aspect, count = line.split(" (")
-                        count = int(count[:-1])
-                        all_positive_aspects[aspect] += count
-                for line in result["Минусы"].split("\n"):
-                    if "(" in line:
-                        aspect, count = line.split(" (")
-                        count = int(count[:-1])
-                        all_negative_aspects[aspect] += count
+                total_neutral_count += neutral_count
+                all_positive_aspects.update(result["positive_aspects"])
+                all_negative_aspects.update(result["negative_aspects"])
                 all_keywords.extend(result["Общие ключевые слова"].split(", "))
 
         main_positives = "\n".join([f"{aspect} ({count})" for aspect, count in all_positive_aspects.most_common(5)]) if all_positive_aspects else "Нет положительных отзывов"
@@ -590,7 +636,10 @@ class ReviewAnalyzer:
             "Ключевые слова (отрицательные, все сайты)": ", ".join(sorted(self.negative_keywords)[:10]),
             "Общие ключевые слова (все сайты)": top_keywords,
             "Положительные отзывы (все сайты)": str(total_positive_count),
-            "Отрицательные отзывы (все сайты)": str(total_negative_count)
+            "Отрицательные отзывы (все сайты)": str(total_negative_count),
+            "Нейтральные отзывы (все сайты)": str(total_neutral_count),
+            "positive_aspects": all_positive_aspects,
+            "negative_aspects": all_negative_aspects
         }
 
     def get_sentiment(self, word: str) -> Tuple[str, float]:
@@ -604,3 +653,87 @@ class ReviewAnalyzer:
         else:
             SENTIMENT_DICT[word] = (sentiment, score)
         logger.info(f"Обновлён словарь тональности: {word} -> {SENTIMENT_DICT[word]}")
+
+    def generate_detailed_report(self, analysis_result: Dict[str, str], product_name: str = "продукт") -> str:
+        positive_aspects = analysis_result["positive_aspects"]
+        negative_aspects = analysis_result["negative_aspects"]
+        positive_count = int(analysis_result["Положительные отзывы"])
+        negative_count = int(analysis_result["Отрицательные отзывы"])
+        neutral_count = int(analysis_result["Нейтральные отзывы"])
+        total_reviews = positive_count + negative_count + neutral_count
+
+        # Формируем заголовок отчёта
+        current_time = datetime.now().strftime("%d.%m.%Y %H:%M")
+        report = f"Никита Челышев, [{current_time}]\n\n"
+
+        # Ключевые плюсы
+        report += "Ключевые плюсы, отмеченные пользователями:\n\n"
+        for aspect, count in positive_aspects.most_common(5):
+            # Ищем примеры из отзывов
+            examples = []
+            aspect_words = set(aspect.lower().split())  # Разбиваем аспект на слова для поиска
+            for review in self.review_data:
+                pros_text = review['original_pros'].lower() if review['original_pros'] else ''
+                if all(word in pros_text for word in aspect_words):  # Проверяем, что все слова аспекта есть в тексте
+                    examples.append(f'"{review["original_pros"]}" ({review["username"]})')
+                    if len(examples) >= 2:
+                        break
+            # Форматируем аспект для отображения
+            formatted_aspect = ' '.join(word.capitalize() for word in aspect.split())
+            report += f"{formatted_aspect}\n"
+            report += f"Часто упоминается ({count} раз). Примеры: {', '.join(examples) if examples else 'Примеры не найдены.'}\n\n"
+
+        # Ключевые минусы
+        report += "\n\nКлючевые минусы, отмеченные пользователями:\n\n"
+        for aspect, count in negative_aspects.most_common(5):
+            examples = []
+            aspect_words = set(aspect.lower().split())
+            for review in self.review_data:
+                pros_text = review['original_pros'].lower() if review['original_pros'] else ''
+                cons_text = review['original_cons'].lower() if review['original_cons'] else ''
+                review_text = pros_text + ' ' + cons_text
+                if all(word in review_text for word in aspect_words):
+                    examples.append(f'"{review["original_pros"]}" ({review["username"]})')
+                    if len(examples) >= 2:
+                        break
+            formatted_aspect = ' '.join(word.capitalize() for word in aspect.split())
+            report += f"{formatted_aspect}\n"
+            report += f"Часто упоминается ({count} раз). Примеры: {', '.join(examples) if examples else 'Примеры не найдены.'}\n\n"
+
+        # Общий анализ оценок
+        report += "\n\nОбщий анализ оценок:\n\n"
+        positive_percentage = (positive_count / total_reviews * 100) if total_reviews > 0 else 0
+        negative_percentage = (negative_count / total_reviews * 100) if total_reviews > 0 else 0
+        neutral_percentage = (neutral_count / total_reviews * 100) if total_reviews > 0 else 0
+        average_rating = sum(review['rating'] for review in self.review_data) / total_reviews if total_reviews > 0 else 0
+        report += f"Средняя оценка: {average_rating:.1f} из 5. Положительные отзывы (оценки 4-5) составляют около {positive_percentage:.1f}% ({positive_count} отзывов), "
+        report += f"отрицательные (оценки 1-2) — около {negative_percentage:.1f}% ({negative_count} отзывов), "
+        report += f"нейтральные (оценка 3) — около {neutral_percentage:.1f}% ({neutral_count} отзывов).\n\n"
+
+        # Детализированный вывод
+        report += f"\n\nДетализированный вывод:\n\n"
+        top_positive_aspects = [aspect for aspect, _ in positive_aspects.most_common(3)]
+        top_negative_aspects = [aspect for aspect, _ in negative_aspects.most_common(3)]
+        
+        if positive_percentage > negative_percentage:
+            report += f"Пользователи в целом довольны {product_name}. Основные преимущества включают {', '.join(top_positive_aspects).lower()}. "
+            report += f"Положительные отзывы составляют {positive_percentage:.1f}%, что указывает на удовлетворённость большинства.\n\n"
+            report += f"Однако есть и недостатки. Основные из них — {', '.join(top_negative_aspects).lower()}. "
+            report += f"Эти аспекты упоминаются реже и составляют {negative_percentage:.1f}% отзывов, но могут повлиять на общее впечатление.\n\n"
+        else:
+            report += f"Пользователи выражают смешанные впечатления о {product_name}. Основные преимущества включают {', '.join(top_positive_aspects).lower()}. "
+            report += f"Однако положительные отзывы составляют лишь {positive_percentage:.1f}%, что указывает на ограниченное удовлетворение.\n\n"
+            report += f"Наибольшие проблемы связаны с {', '.join(top_negative_aspects).lower()}. "
+            report += f"Эти аспекты упоминаются чаще и оказывают значительное негативное влияние, что подтверждается преобладанием отрицательных отзывов ({negative_percentage:.1f}%).\n\n"
+
+        # Итог
+        report += f"\n\nИтог: {product_name} получает среднюю оценку {average_rating:.1f} из 5, "
+        if average_rating >= 4.0:
+            report += f"что свидетельствует о высоком уровне удовлетворённости. "
+        elif average_rating >= 3.0:
+            report += f"что отражает умеренное восприятие продукта. "
+        else:
+            report += f"что отражает значительные проблемы с восприятием продукта. "
+        report += f"Компании стоит сосредоточиться на улучшении {', '.join([aspect for aspect, _ in negative_aspects.most_common(2)]).lower()}, чтобы повысить лояльность клиентов.\n"
+
+        return report

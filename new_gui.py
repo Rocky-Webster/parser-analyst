@@ -50,6 +50,8 @@ class ParserApp:
         self.site_links = {site: ctk.StringVar() for site in SITE_NAMES}
         self.use_preprocessing = ctk.BooleanVar(value=True)  # Переключатель для предобработки
         self.csv_files = []  # Хранение путей к CSV-файлам
+        self.product_name = ctk.StringVar(value="продукт")  # Название продукта для отчёта
+        self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())  # Инициализация анализатора
 
         self.create_widgets()
         self.setup_logger_redirect()
@@ -68,6 +70,7 @@ class ParserApp:
         self.tabview.add("Парсер отзывов")
         self.tabview.add("Анализ слов")
         self.tabview.add("Детальный анализ предложений")
+        self.tabview.add("Текстовый отчёт")  # Новая вкладка
 
         # Вкладка "Парсер отзывов"
         parser_tab = self.tabview.tab("Парсер отзывов")
@@ -215,23 +218,39 @@ class ParserApp:
         self.detailed_tree.column("Score", width=100, anchor="w")
         self.detailed_tree.column("Aspects", width=400, anchor="w")
 
-        style.configure("Custom.Vertical.TScrollbar",
-                        troughcolor="#1E1E1E",
-                        background="#1DA1F2",
-                        arrowcolor="#FFFFFF")
         v_scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', style="Custom.Vertical.TScrollbar", command=self.detailed_tree.yview)
         v_scrollbar.pack(side="right", fill="y")
         self.detailed_tree.configure(yscrollcommand=v_scrollbar.set)
 
-        style.configure("Custom.Horizontal.TScrollbar",
-                        troughcolor="#1E1E1E",
-                        background="#1DA1F2",
-                        arrowcolor="#FFFFFF")
         h_scrollbar = ttk.Scrollbar(tree_frame, orient='horizontal', style="Custom.Horizontal.TScrollbar", command=self.detailed_tree.xview)
         h_scrollbar.pack(side="bottom", fill="x")
         self.detailed_tree.configure(xscrollcommand=h_scrollbar.set)
 
         self.detailed_tree.pack(fill="both", expand=True)
+
+        # Вкладка "Текстовый отчёт"
+        report_tab = self.tabview.tab("Текстовый отчёт")
+
+        report_frame = ctk.CTkFrame(report_tab, fg_color="#2C2C2C")
+        report_frame.pack(fill="both", expand=True, pady=5, padx=5)
+        ctk.CTkLabel(report_frame, text="Текстовый отчёт", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
+
+        # Поле для ввода названия продукта
+        product_frame = ctk.CTkFrame(report_frame, fg_color="#2C2C2C")
+        product_frame.pack(fill="x", pady=2, padx=5)
+        ctk.CTkLabel(product_frame, text="Название продукта:", font=("Arial", 12), text_color="white").pack(side="left", padx=5)
+        ctk.CTkEntry(product_frame, textvariable=self.product_name, width=300, height=30, font=("Arial", 12), fg_color="#3A3A3A", border_color="#1DA1F2", corner_radius=10).pack(side="left", padx=5)
+
+        # Кнопки для генерации отчёта
+        button_frame = ctk.CTkFrame(report_frame, fg_color="#2C2C2C")
+        button_frame.pack(fill="x", pady=5, padx=5)
+        ctk.CTkButton(button_frame, text="Сгенерировать отчёт по сайтам", command=self.generate_report_by_site, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(side="left", padx=5)
+        ctk.CTkButton(button_frame, text="Сгенерировать агрегированный отчёт", command=self.generate_aggregated_report, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(side="left", padx=5)
+        ctk.CTkButton(button_frame, text="Сохранить отчёт в файл", command=self.save_report_to_file, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(side="left", padx=5)
+
+        # Текстовое поле для отображения отчёта
+        self.report_textbox = ctk.CTkTextbox(report_frame, height=400, width=850, font=("Arial", 12), text_color="white", fg_color="#3A3A3A", border_color="#1DA1F2")
+        self.report_textbox.pack(fill="both", expand=True, padx=5, pady=5)
 
     def save_table_to_excel(self):
         """Сохраняет данные из таблицы result_tree в файл Excel с настройкой формата."""
@@ -334,6 +353,32 @@ class ParserApp:
         except Exception as e:
             self.log(f"Ошибка при сохранении детального анализа в Excel: {str(e)}", is_error=True)
             messagebox.showerror("Ошибка", f"Не удалось сохранить детальный анализ: {str(e)}")
+
+    def save_report_to_file(self):
+        """Сохраняет текстовый отчёт в файл."""
+        report_content = self.report_textbox.get("0.0", "end").strip()
+        if not report_content:
+            self.log("Отчёт пуст, нечего сохранять!", is_error=True)
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".txt",
+            filetypes=[("Text files", "*.txt"), ("All files", "*.*")],
+            title="Сохранить отчёт как"
+        )
+
+        if not file_path:
+            self.log("Сохранение отменено пользователем.")
+            return
+
+        try:
+            with open(file_path, "w", encoding="utf-8") as f:
+                f.write(report_content)
+            self.log(f"Отчёт успешно сохранён в {file_path}")
+            messagebox.showinfo("Успех", f"Отчёт сохранён в {file_path}")
+        except Exception as e:
+            self.log(f"Ошибка при сохранении отчёта: {str(e)}", is_error=True)
+            messagebox.showerror("Ошибка", f"Не удалось сохранить отчёт: {str(e)}")
 
     def visualize_results(self):
         """Визуализирует результаты анализа слов в виде гистограммы ключевых слов."""
@@ -612,10 +657,11 @@ class ParserApp:
             self.log("Не выбраны CSV-файлы для анализа!", is_error=True)
             return
 
-        # Сохраняем выбранные файлы для последующей визуализации
+        # Сохраняем выбранные файлы для последующей визуализации и отчёта
         self.csv_files = list(csv_files)
+        self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())  # Обновляем анализатор
+        self.results_by_site = []  # Сохраняем результаты для отчёта
 
-        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
         self.result_tree.delete(*self.result_tree.get_children())
         total_files = len(csv_files)
         for i, csv_file in enumerate(csv_files):
@@ -625,7 +671,8 @@ class ParserApp:
                     self.log(f"Не удалось определить сайт для файла {csv_file}", is_error=True)
                     continue
                 self.log(f"Анализируем файл: {csv_file}")
-                results = analyzer.analyze_reviews(csv_file)
+                results = self.analyzer.analyze_reviews(csv_file)
+                self.results_by_site.append((site_name, results))
                 self.result_tree.insert("", "end", values=(
                     site_name,
                     results["Плюсы"],
@@ -654,26 +701,26 @@ class ParserApp:
             self.log("Не выбраны CSV-файлы для анализа!", is_error=True)
             return
 
-        # Сохраняем выбранные файлы для последующей визуализации
+        # Сохраняем выбранные файлы для последующей визуализации и отчёта
         self.csv_files = list(csv_files)
+        self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())  # Обновляем анализатор
 
-        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
         self.result_tree.delete(*self.result_tree.get_children())
         self.log(f"Анализируем файлы: {', '.join(csv_files)}")
         
         # Выполняем агрегированный анализ
-        aggregated_results = analyzer.aggregate_reviews(csv_files)
+        self.aggregated_results = self.analyzer.aggregate_reviews(csv_files)
         
         # Формируем одну строку для таблицы
         self.result_tree.insert("", "end", values=(
             "Агрегированный анализ",
-            aggregated_results.get("Плюсы (все сайты)", ""),
-            aggregated_results.get("Минусы (все сайты)", ""),
-            aggregated_results.get("Ключевые слова (положительные, все сайты)", ""),
-            aggregated_results.get("Ключевые слова (отрицательные, все сайты)", ""),
-            aggregated_results.get("Общие ключевые слова (все сайты)", ""),
-            aggregated_results.get("Положительные отзывы (все сайты)", ""),
-            aggregated_results.get("Отрицательные отзывы (все сайты)", "")
+            self.aggregated_results.get("Плюсы (все сайты)", ""),
+            self.aggregated_results.get("Минусы (все сайты)", ""),
+            self.aggregated_results.get("Ключевые слова (положительные, все сайты)", ""),
+            self.aggregated_results.get("Ключевые слова (отрицательные, все сайты)", ""),
+            self.aggregated_results.get("Общие ключевые слова (все сайты)", ""),
+            self.aggregated_results.get("Положительные отзывы (все сайты)", ""),
+            self.aggregated_results.get("Отрицательные отзывы (все сайты)", "")
         ))
         
         self.progress.set(0)
@@ -730,6 +777,38 @@ class ParserApp:
             self.log(f"Ошибка при детальном анализе файла {csv_file}: {str(e)}", is_error=True)
             self.progress_detailed.set(0)
 
+    def generate_report_by_site(self):
+        """Генерирует текстовый отчёт по сайтам."""
+        if not hasattr(self, 'results_by_site') or not self.results_by_site:
+            self.log("Сначала выполните анализ по сайтам на вкладке 'Анализ слов'!", is_error=True)
+            return
+
+        self.report_textbox.delete("0.0", "end")
+        product_name = self.product_name.get().strip() or "продукт"
+        full_report = ""
+
+        for site_name, results in self.results_by_site:
+            full_report += f"Отчёт для {site_name}:\n\n"
+            report = self.analyzer.generate_detailed_report(results, product_name=product_name)
+            full_report += report + "\n" + "="*50 + "\n\n"
+
+        self.report_textbox.insert("0.0", full_report)
+        self.log("Текстовый отчёт по сайтам сгенерирован!")
+        self.tabview.set("Текстовый отчёт")
+
+    def generate_aggregated_report(self):
+        """Генерирует агрегированный текстовый отчёт."""
+        if not hasattr(self, 'aggregated_results'):
+            self.log("Сначала выполните агрегированный анализ на вкладке 'Анализ слов'!", is_error=True)
+            return
+
+        self.report_textbox.delete("0.0", "end")
+        product_name = self.product_name.get().strip() or "продукт"
+        report = self.analyzer.generate_detailed_report(self.aggregated_results, product_name=product_name)
+        self.report_textbox.insert("0.0", report)
+        self.log("Агрегированный текстовый отчёт сгенерирован!")
+        self.tabview.set("Текстовый отчёт")
+
     def get_site_name_from_filename(self, filename):
         """Извлекает имя сайта из имени файла, используя SITE_NAMES."""
         base_name = os.path.basename(filename).lower()
@@ -768,7 +847,7 @@ class ParserApp:
                     return "break"
 
         def bind_to_entry(widget):
-            if isinstance(widget, ctk.CTkEntry):
+            if isinstance(widget, (ctk.CTkEntry, ctk.CTkTextbox)):
                 widget.bind("<Control-Key>", handle_ctrl_key)
             for child in widget.winfo_children():
                 bind_to_entry(child)
@@ -776,8 +855,11 @@ class ParserApp:
         bind_to_entry(self.root)
 
     def select_all(self, widget):
-        widget.select_range(0, 'end')
-        widget.icursor('end')
+        if isinstance(widget, ctk.CTkEntry):
+            widget.select_range(0, 'end')
+            widget.icursor('end')
+        elif isinstance(widget, ctk.CTkTextbox):
+            widget.tag_add("sel", "1.0", "end")
     
     def load_config(self):
         try:
