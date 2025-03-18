@@ -19,6 +19,7 @@ from openpyxl.styles import Alignment
 from review_analyzer import ReviewAnalyzer
 import matplotlib.pyplot as plt
 from collections import Counter
+from wordcloud import WordCloud
 
 # Константы
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -48,7 +49,7 @@ class ParserApp:
         self.output_dir = ctk.StringVar(value=DATA_DIR)
         self.site_links = {site: ctk.StringVar() for site in SITE_NAMES}
         self.use_preprocessing = ctk.BooleanVar(value=True)  # Переключатель для предобработки
-        self.csv_files = []  # Добавляем переменную для хранения путей к CSV-файлам
+        self.csv_files = []  # Хранение путей к CSV-файлам
 
         self.create_widgets()
         self.setup_logger_redirect()
@@ -121,7 +122,8 @@ class ParserApp:
         ctk.CTkButton(file_frame, text="Агрегированный анализ выбранных файлов", command=self.select_files_for_aggregated_analysis, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
         ctk.CTkButton(file_frame, text="Детальный анализ предложений", command=self.select_files_for_detailed_analysis, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
         ctk.CTkButton(file_frame, text="Сохранить таблицу в Excel", command=self.save_table_to_excel, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
-        ctk.CTkButton(file_frame, text="Визуализировать результаты", command=self.visualize_results, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
+        ctk.CTkButton(file_frame, text="Визуализировать гистограмму", command=self.visualize_results, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
+        ctk.CTkButton(file_frame, text="Визуализировать облако слов", command=self.visualize_wordcloud, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
 
         result_frame = ctk.CTkFrame(analysis_tab, fg_color="#2C2C2C")
         result_frame.pack(fill="both", expand=True, pady=5, padx=5)
@@ -213,10 +215,18 @@ class ParserApp:
         self.detailed_tree.column("Score", width=100, anchor="w")
         self.detailed_tree.column("Aspects", width=400, anchor="w")
 
+        style.configure("Custom.Vertical.TScrollbar",
+                        troughcolor="#1E1E1E",
+                        background="#1DA1F2",
+                        arrowcolor="#FFFFFF")
         v_scrollbar = ttk.Scrollbar(tree_frame, orient='vertical', style="Custom.Vertical.TScrollbar", command=self.detailed_tree.yview)
         v_scrollbar.pack(side="right", fill="y")
         self.detailed_tree.configure(yscrollcommand=v_scrollbar.set)
 
+        style.configure("Custom.Horizontal.TScrollbar",
+                        troughcolor="#1E1E1E",
+                        background="#1DA1F2",
+                        arrowcolor="#FFFFFF")
         h_scrollbar = ttk.Scrollbar(tree_frame, orient='horizontal', style="Custom.Horizontal.TScrollbar", command=self.detailed_tree.xview)
         h_scrollbar.pack(side="bottom", fill="x")
         self.detailed_tree.configure(xscrollcommand=h_scrollbar.set)
@@ -327,7 +337,7 @@ class ParserApp:
 
     def visualize_results(self):
         """Визуализирует результаты анализа слов в виде гистограммы ключевых слов."""
-        if not self.csv_files:  # Проверяем, выбраны ли CSV-файлы
+        if not self.csv_files:
             self.log("Не выбраны CSV-файлы для анализа, нечего визуализировать!", is_error=True)
             return
 
@@ -359,13 +369,13 @@ class ParserApp:
         # Обрабатываем отзывы и собираем аспекты
         positive_keywords = []
         negative_keywords = []
-        keyword_review_count = Counter()  # Для подсчёта, в скольки отзывах встречается ключевое слово
+        keyword_review_count = Counter()
 
         for review in all_reviews:
             sentences = analyzer.analyze_review_sentences(review)
             review_pos_keywords = set()
             review_neg_keywords = set()
-            for sentence, sentiment, _, aspects in sentences:
+            for _, _, _, aspects in sentences:
                 for aspect_phrase, aspect_sentiment, _ in aspects:
                     if aspect_phrase.lower() in analyzer.invalid_phrases:
                         continue
@@ -375,7 +385,6 @@ class ParserApp:
                     elif aspect_sentiment == "отрицательное":
                         negative_keywords.append(aspect_phrase)
                         review_neg_keywords.add(aspect_phrase)
-            # Увеличиваем счётчик для каждого ключевого слова в этом отзыве
             for keyword in review_pos_keywords:
                 keyword_review_count[keyword] += 1
             for keyword in review_neg_keywords:
@@ -386,44 +395,125 @@ class ParserApp:
         neg_keyword_counts = Counter(negative_keywords)
 
         # Фильтруем ключевые слова: оставляем только те, которые встречаются в более чем одном отзыве
-        MIN_REVIEW_THRESHOLD = 2  # Минимальное количество отзывов, в которых должно встречаться слово
+        MIN_REVIEW_THRESHOLD = 2
         filtered_pos_keywords = {k: v for k, v in pos_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
         filtered_neg_keywords = {k: v for k, v in neg_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
-
-        # Подготовка данных для гистограммы
-        top_pos_keywords = dict(sorted(filtered_pos_keywords.items(), key=lambda x: x[1], reverse=True)[:10])
-        top_neg_keywords = dict(sorted(filtered_neg_keywords.items(), key=lambda x: x[1], reverse=True)[:10])
 
         # Создаём гистограмму
         plt.figure(figsize=(12, 6))
 
         # Положительные ключевые слова
-        if top_pos_keywords:
+        if filtered_pos_keywords:
             plt.subplot(1, 2, 1)
-            bars = plt.barh(list(top_pos_keywords.keys()), list(top_pos_keywords.values()), color='green')
+            bars = plt.barh(list(filtered_pos_keywords.keys())[:10], list(filtered_pos_keywords.values())[:10], color='green')
             plt.title("Топ-10 положительных ключевых слов")
             plt.xlabel("Частота")
             plt.gca().invert_yaxis()
-            # Добавляем подписи к столбцам
             for bar in bars:
                 width = bar.get_width()
                 plt.text(width, bar.get_y() + bar.get_height()/2, f'{int(width)}', ha='left', va='center')
 
         # Отрицательные ключевые слова
-        if top_neg_keywords:
+        if filtered_neg_keywords:
             plt.subplot(1, 2, 2)
-            bars = plt.barh(list(top_neg_keywords.keys()), list(top_neg_keywords.values()), color='red')
+            bars = plt.barh(list(filtered_neg_keywords.keys())[:10], list(filtered_neg_keywords.values())[:10], color='red')
             plt.title("Топ-10 отрицательных ключевых слов")
             plt.xlabel("Частота")
             plt.gca().invert_yaxis()
-            # Добавляем подписи к столбцам
             for bar in bars:
                 width = bar.get_width()
                 plt.text(width, bar.get_y() + bar.get_height()/2, f'{int(width)}', ha='left', va='center')
 
         plt.tight_layout()
         plt.show()
-        self.log("Визуализация результатов завершена!")
+        self.log("Визуализация гистограммы завершена!")
+
+    def visualize_wordcloud(self):
+        """Визуализирует результаты анализа слов в виде облака слов."""
+        if not self.csv_files:
+            self.log("Не выбраны CSV-файлы для анализа, нечего визуализировать!", is_error=True)
+            return
+
+        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+        
+        # Собираем все отзывы из CSV-файлов
+        all_reviews = []
+        for csv_file in self.csv_files:
+            try:
+                df = pd.read_csv(csv_file, encoding='utf-8')
+                if 'Текст отзыва' in df.columns:
+                    reviews = df['Текст отзыва'].dropna().tolist()
+                    all_reviews.extend(reviews)
+                elif 'Достоинства' in df.columns and 'Недостатки' in df.columns:
+                    pros_reviews = df['Достоинства'].dropna().tolist()
+                    cons_reviews = df['Недостатки'].dropna().tolist()
+                    all_reviews.extend(pros_reviews + cons_reviews)
+                else:
+                    self.log(f"CSV-файл {csv_file} не содержит подходящих столбцов для анализа!", is_error=True)
+                    continue
+            except Exception as e:
+                self.log(f"Ошибка при чтении файла {csv_file}: {str(e)}", is_error=True)
+                continue
+
+        if not all_reviews:
+            self.log("Нет отзывов для визуализации!", is_error=True)
+            return
+
+        # Обрабатываем отзывы и собираем аспекты
+        positive_keywords = []
+        negative_keywords = []
+        keyword_review_count = Counter()
+
+        for review in all_reviews:
+            sentences = analyzer.analyze_review_sentences(review)
+            review_pos_keywords = set()
+            review_neg_keywords = set()
+            for _, _, _, aspects in sentences:
+                for aspect_phrase, aspect_sentiment, _ in aspects:
+                    if aspect_phrase.lower() in analyzer.invalid_phrases:
+                        continue
+                    if aspect_sentiment == "положительное":
+                        positive_keywords.append(aspect_phrase)
+                        review_pos_keywords.add(aspect_phrase)
+                    elif aspect_sentiment == "отрицательное":
+                        negative_keywords.append(aspect_phrase)
+                        review_neg_keywords.add(aspect_phrase)
+            for keyword in review_pos_keywords:
+                keyword_review_count[keyword] += 1
+            for keyword in review_neg_keywords:
+                keyword_review_count[keyword] += 1
+
+        # Подсчитываем частотность ключевых слов
+        pos_keyword_counts = Counter(positive_keywords)
+        neg_keyword_counts = Counter(negative_keywords)
+
+        # Фильтруем ключевые слова: оставляем только те, которые встречаются в более чем одном отзыве
+        MIN_REVIEW_THRESHOLD = 2
+        filtered_pos_keywords = {k: v for k, v in pos_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
+        filtered_neg_keywords = {k: v for k, v in neg_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
+
+        # Генерация облака слов
+        plt.figure(figsize=(15, 6))
+
+        # Облако для положительных слов
+        if filtered_pos_keywords:
+            plt.subplot(1, 2, 1)
+            wordcloud_pos = WordCloud(width=800, height=400, background_color='black', colormap='Greens', min_font_size=10, max_words=50).generate_from_frequencies(filtered_pos_keywords)
+            plt.imshow(wordcloud_pos, interpolation='bilinear')
+            plt.title("Облако положительных слов", fontsize=16, color='white')
+            plt.axis('off')
+
+        # Облако для отрицательных слов
+        if filtered_neg_keywords:
+            plt.subplot(1, 2, 2)
+            wordcloud_neg = WordCloud(width=800, height=400, background_color='black', colormap='Reds', min_font_size=10, max_words=50).generate_from_frequencies(filtered_neg_keywords)
+            plt.imshow(wordcloud_neg, interpolation='bilinear')
+            plt.title("Облако отрицательных слов", fontsize=16, color='white')
+            plt.axis('off')
+
+        plt.tight_layout(pad=0)
+        plt.show()
+        self.log("Визуализация облака слов завершена!")
 
     def log(self, message, is_error=False):
         self.log_text.configure(state="normal")
@@ -570,18 +660,22 @@ class ParserApp:
         analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
         self.result_tree.delete(*self.result_tree.get_children())
         self.log(f"Анализируем файлы: {', '.join(csv_files)}")
+        
+        # Выполняем агрегированный анализ
         aggregated_results = analyzer.aggregate_reviews(csv_files)
-        for key, value in aggregated_results.items():
-            self.result_tree.insert("", "end", values=(
-                key,
-                value if key == "Плюсы (все сайты)" else "",
-                value if key == "Минусы (все сайты)" else "",
-                value if key == "Ключевые слова (положительные, все сайты)" else "",
-                value if key == "Ключевые слова (отрицательные, все сайты)" else "",
-                value if key == "Общие ключевые слова (все сайты)" else "",
-                value if key == "Положительные отзывы (все сайты)" else "",
-                value if key == "Отрицательные отзывы (все сайты)" else ""
-            ))
+        
+        # Формируем одну строку для таблицы
+        self.result_tree.insert("", "end", values=(
+            "Агрегированный анализ",
+            aggregated_results.get("Плюсы (все сайты)", ""),
+            aggregated_results.get("Минусы (все сайты)", ""),
+            aggregated_results.get("Ключевые слова (положительные, все сайты)", ""),
+            aggregated_results.get("Ключевые слова (отрицательные, все сайты)", ""),
+            aggregated_results.get("Общие ключевые слова (все сайты)", ""),
+            aggregated_results.get("Положительные отзывы (все сайты)", ""),
+            aggregated_results.get("Отрицательные отзывы (все сайты)", "")
+        ))
+        
         self.progress.set(0)
         self.log("Агрегированный анализ отзывов завершён!")
         self.tabview.set("Анализ слов")
@@ -609,7 +703,7 @@ class ParserApp:
                 reviews = (df['Достоинства'].dropna().tolist() + 
                            df['Недостатки'].dropna().tolist())
             else:
-                self.log("CSV-файл не содержит подходящих столбцов для анализа!", is_error=True)
+                self.log(f"CSV-файл {csv_file} не содержит подходящих столбцов для анализа!", is_error=True)
                 return
             
             total_reviews = len(reviews)
