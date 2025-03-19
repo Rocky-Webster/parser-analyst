@@ -9,7 +9,6 @@ from concurrent.futures import ThreadPoolExecutor
 from parsers.site1_parser import Site1Parser
 from parsers.site2_parser import Site2Parser
 from parsers.site3_parser import Site3Parser
-from visualization import plot_rating_histogram
 from tkinter import messagebox, filedialog
 from tkinter import ttk
 import pandas as pd
@@ -18,6 +17,7 @@ from openpyxl.utils import get_column_letter
 from openpyxl.styles import Alignment
 from review_analyzer import ReviewAnalyzer
 import matplotlib.pyplot as plt
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from collections import Counter
 from wordcloud import WordCloud
 
@@ -44,14 +44,19 @@ class ParserApp:
         self.root.geometry(WINDOW_SIZE)
         self.root.resizable(True, True)
         self.root.configure(bg="#1A1A1A")
-        self.running = False
+        self.running = False  # Флаг для парсинга
+        self.is_running = True  # Глобальный флаг для отслеживания работы приложения
+        self.threads = []  # Список для хранения всех потоков
 
         self.output_dir = ctk.StringVar(value=DATA_DIR)
         self.site_links = {site: ctk.StringVar() for site in SITE_NAMES}
-        self.use_preprocessing = ctk.BooleanVar(value=True)  # Переключатель для предобработки
-        self.csv_files = []  # Хранение путей к CSV-файлам
-        self.product_name = ctk.StringVar(value="продукт")  # Название продукта для отчёта
-        self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())  # Инициализация анализатора
+        self.use_preprocessing = ctk.BooleanVar(value=True)
+        self.csv_files = []
+        self.product_name = ctk.StringVar(value="продукт")
+        self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+        self.results_by_site = []
+        self.aggregated_results = None
+        self.analysis_cache = {}  # Для кэширования результатов анализа
 
         self.create_widgets()
         self.setup_logger_redirect()
@@ -70,7 +75,7 @@ class ParserApp:
         self.tabview.add("Парсер отзывов")
         self.tabview.add("Анализ слов")
         self.tabview.add("Детальный анализ предложений")
-        self.tabview.add("Текстовый отчёт")  # Новая вкладка
+        self.tabview.add("Текстовый отчёт")
 
         # Вкладка "Парсер отзывов"
         parser_tab = self.tabview.tab("Парсер отзывов")
@@ -120,7 +125,7 @@ class ParserApp:
         file_frame = ctk.CTkFrame(analysis_tab, fg_color="#2C2C2C")
         file_frame.pack(fill="x", pady=2, padx=5, expand=False)
         ctk.CTkLabel(file_frame, text="Выбор CSV-файлов для анализа", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
-        ctk.CTkCheckBox(file_frame, text="Использовать предобработку текста (исправление опечаток)", variable=self.use_preprocessing, font=("Arial", 12), text_color="white").pack(anchor="w", padx=5, pady=2)
+        ctk.CTkCheckBox(file_frame, text="Использовать предобработку текста (исправление опечаток)", variable=self.use_preprocessing, font=("Arial", 12), text_color="white", command=self.update_analyzer).pack(anchor="w", padx=5, pady=2)
         ctk.CTkButton(file_frame, text="Выбрать файлы для анализа по сайтам", command=self.select_files_for_analysis_by_site, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
         ctk.CTkButton(file_frame, text="Агрегированный анализ выбранных файлов", command=self.select_files_for_aggregated_analysis, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
         ctk.CTkButton(file_frame, text="Детальный анализ предложений", command=self.select_files_for_detailed_analysis, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(pady=5)
@@ -195,7 +200,6 @@ class ParserApp:
         detailed_frame.pack(fill="both", expand=True, pady=5, padx=5)
         ctk.CTkLabel(detailed_frame, text="Детальный анализ предложений", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
 
-        # Кнопка для сохранения и прогресс-бар
         button_frame = ctk.CTkFrame(detailed_frame, fg_color="#2C2C2C")
         button_frame.pack(fill="x", pady=5, padx=5)
         ctk.CTkButton(button_frame, text="Сохранить детальный анализ в Excel", command=self.save_detailed_table_to_excel, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(side="left", padx=5)
@@ -203,7 +207,6 @@ class ParserApp:
         self.progress_detailed.pack(side="right", padx=5)
         self.progress_detailed.set(0)
 
-        # Таблица для отображения предложений
         tree_frame = ctk.CTkFrame(detailed_frame, fg_color="#333333")
         tree_frame.pack(fill="both", expand=True)
 
@@ -235,25 +238,32 @@ class ParserApp:
         report_frame.pack(fill="both", expand=True, pady=5, padx=5)
         ctk.CTkLabel(report_frame, text="Текстовый отчёт", font=("Arial", 14, "bold"), text_color="white").pack(anchor="w", padx=5, pady=2)
 
-        # Поле для ввода названия продукта
         product_frame = ctk.CTkFrame(report_frame, fg_color="#2C2C2C")
         product_frame.pack(fill="x", pady=2, padx=5)
         ctk.CTkLabel(product_frame, text="Название продукта:", font=("Arial", 12), text_color="white").pack(side="left", padx=5)
         ctk.CTkEntry(product_frame, textvariable=self.product_name, width=300, height=30, font=("Arial", 12), fg_color="#3A3A3A", border_color="#1DA1F2", corner_radius=10).pack(side="left", padx=5)
 
-        # Кнопки для генерации отчёта
         button_frame = ctk.CTkFrame(report_frame, fg_color="#2C2C2C")
         button_frame.pack(fill="x", pady=5, padx=5)
         ctk.CTkButton(button_frame, text="Сгенерировать отчёт по сайтам", command=self.generate_report_by_site, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(side="left", padx=5)
         ctk.CTkButton(button_frame, text="Сгенерировать агрегированный отчёт", command=self.generate_aggregated_report, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(side="left", padx=5)
         ctk.CTkButton(button_frame, text="Сохранить отчёт в файл", command=self.save_report_to_file, fg_color="#1DA1F2", hover_color="#166AB1", width=250, height=30, font=("Arial", 12), corner_radius=10).pack(side="left", padx=5)
+        self.progress_report = ctk.CTkProgressBar(button_frame, mode="determinate", width=250, height=20, progress_color="#1DA1F2", fg_color="#4A4A4A")
+        self.progress_report.pack(side="right", padx=5)
+        self.progress_report.set(0)
 
-        # Текстовое поле для отображения отчёта
         self.report_textbox = ctk.CTkTextbox(report_frame, height=400, width=850, font=("Arial", 12), text_color="white", fg_color="#3A3A3A", border_color="#1DA1F2")
         self.report_textbox.pack(fill="both", expand=True, padx=5, pady=5)
 
+    def update_analyzer(self):
+        if not self.is_running:
+            return
+        self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+        self.log(f"Анализатор обновлён с предобработкой: {self.use_preprocessing.get()}")
+
     def save_table_to_excel(self):
-        """Сохраняет данные из таблицы result_tree в файл Excel с настройкой формата."""
+        if not self.is_running:
+            return
         columns = ["Категория", "Плюсы", "Минусы", "Ключевые слова (положительные)", "Ключевые слова (отрицательные)", "Общие ключевые слова", "Положительные отзывы", "Отрицательные отзывы"]
         data = []
 
@@ -263,9 +273,8 @@ class ParserApp:
 
         if not data:
             self.log("Таблица пуста, нечего сохранять!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Таблица пуста, нечего сохранять!")
             return
-
-        df = pd.DataFrame(data, columns=columns)
 
         file_path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
@@ -278,6 +287,7 @@ class ParserApp:
             return
 
         try:
+            df = pd.DataFrame(data, columns=columns)
             df.to_excel(file_path, index=False, engine='openpyxl')
             wb = openpyxl.load_workbook(file_path)
             ws = wb.active
@@ -304,7 +314,8 @@ class ParserApp:
             messagebox.showerror("Ошибка", f"Не удалось сохранить таблицу: {str(e)}")
 
     def save_detailed_table_to_excel(self):
-        """Сохраняет данные из таблицы detailed_tree в файл Excel с настройкой формата."""
+        if not self.is_running:
+            return
         columns = ["Предложение", "Тональность", "Скор", "Аспекты"]
         data = []
 
@@ -314,9 +325,8 @@ class ParserApp:
 
         if not data:
             self.log("Таблица детального анализа пуста, нечего сохранять!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Таблица детального анализа пуста, нечего сохранять!")
             return
-
-        df = pd.DataFrame(data, columns=columns)
 
         file_path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
@@ -329,6 +339,7 @@ class ParserApp:
             return
 
         try:
+            df = pd.DataFrame(data, columns=columns)
             df.to_excel(file_path, index=False, engine='openpyxl')
             wb = openpyxl.load_workbook(file_path)
             ws = wb.active
@@ -355,10 +366,12 @@ class ParserApp:
             messagebox.showerror("Ошибка", f"Не удалось сохранить детальный анализ: {str(e)}")
 
     def save_report_to_file(self):
-        """Сохраняет текстовый отчёт в файл."""
+        if not self.is_running:
+            return
         report_content = self.report_textbox.get("0.0", "end").strip()
         if not report_content:
             self.log("Отчёт пуст, нечего сохранять!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Отчёт пуст, нечего сохранять!")
             return
 
         file_path = filedialog.asksaveasfilename(
@@ -381,195 +394,266 @@ class ParserApp:
             messagebox.showerror("Ошибка", f"Не удалось сохранить отчёт: {str(e)}")
 
     def visualize_results(self):
-        """Визуализирует результаты анализа слов в виде гистограммы ключевых слов."""
+        if not self.is_running:
+            return
         if not self.csv_files:
             self.log("Не выбраны CSV-файлы для анализа, нечего визуализировать!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Не выбраны CSV-файлы для анализа!")
             return
 
-        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
-        
-        # Собираем все отзывы из CSV-файлов
-        all_reviews = []
-        for csv_file in self.csv_files:
+        self.progress.set(0)
+        self.log("Запуск визуализации гистограммы...")
+
+        def compute_data():
             try:
-                df = pd.read_csv(csv_file, encoding='utf-8')
-                if 'Текст отзыва' in df.columns:
-                    reviews = df['Текст отзыва'].dropna().tolist()
-                    all_reviews.extend(reviews)
-                elif 'Достоинства' in df.columns and 'Недостатки' in df.columns:
-                    pros_reviews = df['Достоинства'].dropna().tolist()
-                    cons_reviews = df['Недостатки'].dropna().tolist()
-                    all_reviews.extend(pros_reviews + cons_reviews)
-                else:
-                    self.log(f"CSV-файл {csv_file} не содержит подходящих столбцов для анализа!", is_error=True)
-                    continue
-            except Exception as e:
-                self.log(f"Ошибка при чтении файла {csv_file}: {str(e)}", is_error=True)
-                continue
-
-        if not all_reviews:
-            self.log("Нет отзывов для визуализации!", is_error=True)
-            return
-
-        # Обрабатываем отзывы и собираем аспекты
-        positive_keywords = []
-        negative_keywords = []
-        keyword_review_count = Counter()
-
-        for review in all_reviews:
-            sentences = analyzer.analyze_review_sentences(review)
-            review_pos_keywords = set()
-            review_neg_keywords = set()
-            for _, _, _, aspects in sentences:
-                for aspect_phrase, aspect_sentiment, _ in aspects:
-                    if aspect_phrase.lower() in analyzer.invalid_phrases:
+                all_reviews = []
+                for i, csv_file in enumerate(self.csv_files):
+                    if not self.is_running:
+                        return None, None
+                    try:
+                        df = pd.read_csv(csv_file, encoding='utf-8')
+                        if 'Текст отзыва' in df.columns:
+                            reviews = df['Текст отзыва'].dropna().tolist()
+                            all_reviews.extend(reviews)
+                        elif 'Достоинства' in df.columns and 'Недостатки' in df.columns:
+                            pros_reviews = df['Достоинства'].dropna().tolist()
+                            cons_reviews = df['Недостатки'].dropna().tolist()
+                            all_reviews.extend(pros_reviews + cons_reviews)
+                        else:
+                            self.log(f"CSV-файл {csv_file} не содержит подходящих столбцов для анализа!", is_error=True)
+                            continue
+                    except Exception as e:
+                        self.log(f"Ошибка при чтении файла {csv_file}: {str(e)}", is_error=True)
                         continue
-                    if aspect_sentiment == "положительное":
-                        positive_keywords.append(aspect_phrase)
-                        review_pos_keywords.add(aspect_phrase)
-                    elif aspect_sentiment == "отрицательное":
-                        negative_keywords.append(aspect_phrase)
-                        review_neg_keywords.add(aspect_phrase)
-            for keyword in review_pos_keywords:
-                keyword_review_count[keyword] += 1
-            for keyword in review_neg_keywords:
-                keyword_review_count[keyword] += 1
+                    self.progress.set((i + 1) / len(self.csv_files) * 100)
 
-        # Подсчитываем частотность ключевых слов
-        pos_keyword_counts = Counter(positive_keywords)
-        neg_keyword_counts = Counter(negative_keywords)
+                if not all_reviews:
+                    self.log("Нет отзывов для визуализации!", is_error=True)
+                    messagebox.showwarning("Предупреждение", "Нет отзывов для визуализации!")
+                    return None, None
 
-        # Фильтруем ключевые слова: оставляем только те, которые встречаются в более чем одном отзыве
-        MIN_REVIEW_THRESHOLD = 2
-        filtered_pos_keywords = {k: v for k, v in pos_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
-        filtered_neg_keywords = {k: v for k, v in neg_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
+                positive_keywords = []
+                negative_keywords = []
+                keyword_review_count = Counter()
 
-        # Создаём гистограмму
-        plt.figure(figsize=(12, 6))
+                for review in all_reviews:
+                    if not self.is_running:
+                        return None, None
+                    sentences = self.analyzer.analyze_review_sentences(review)
+                    review_pos_keywords = set()
+                    review_neg_keywords = set()
+                    for _, _, _, aspects in sentences:
+                        for aspect_phrase, aspect_sentiment, _, _ in aspects:
+                            if aspect_phrase.lower() in self.analyzer.invalid_phrases:
+                                continue
+                            if aspect_sentiment == "положительное":
+                                positive_keywords.append(aspect_phrase)
+                                review_pos_keywords.add(aspect_phrase)
+                            elif aspect_sentiment == "отрицательное":
+                                negative_keywords.append(aspect_phrase)
+                                review_neg_keywords.add(aspect_phrase)
+                    for keyword in review_pos_keywords:
+                        keyword_review_count[keyword] += 1
+                    for keyword in review_neg_keywords:
+                        keyword_review_count[keyword] += 1
 
-        # Положительные ключевые слова
-        if filtered_pos_keywords:
-            plt.subplot(1, 2, 1)
-            bars = plt.barh(list(filtered_pos_keywords.keys())[:10], list(filtered_pos_keywords.values())[:10], color='green')
-            plt.title("Топ-10 положительных ключевых слов")
-            plt.xlabel("Частота")
-            plt.gca().invert_yaxis()
-            for bar in bars:
-                width = bar.get_width()
-                plt.text(width, bar.get_y() + bar.get_height()/2, f'{int(width)}', ha='left', va='center')
+                pos_keyword_counts = Counter(positive_keywords)
+                neg_keyword_counts = Counter(negative_keywords)
 
-        # Отрицательные ключевые слова
-        if filtered_neg_keywords:
-            plt.subplot(1, 2, 2)
-            bars = plt.barh(list(filtered_neg_keywords.keys())[:10], list(filtered_neg_keywords.values())[:10], color='red')
-            plt.title("Топ-10 отрицательных ключевых слов")
-            plt.xlabel("Частота")
-            plt.gca().invert_yaxis()
-            for bar in bars:
-                width = bar.get_width()
-                plt.text(width, bar.get_y() + bar.get_height()/2, f'{int(width)}', ha='left', va='center')
+                MIN_REVIEW_THRESHOLD = 2
+                filtered_pos_keywords = {k: v for k, v in pos_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
+                filtered_neg_keywords = {k: v for k, v in neg_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
 
-        plt.tight_layout()
-        plt.show()
-        self.log("Визуализация гистограммы завершена!")
+                return filtered_pos_keywords, filtered_neg_keywords
+            except Exception as e:
+                self.log(f"Ошибка при вычислении данных для визуализации: {str(e)}", is_error=True)
+                messagebox.showerror("Ошибка", f"Не удалось выполнить вычисления: {str(e)}")
+                return None, None
+            finally:
+                self.progress.set(0)
+
+        def show_visualization(filtered_pos_keywords, filtered_neg_keywords):
+            if not self.is_running:
+                return
+
+            if filtered_pos_keywords is None or filtered_neg_keywords is None:
+                return
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 6))
+
+            if filtered_pos_keywords:
+                bars = ax1.barh(list(filtered_pos_keywords.keys())[:10], list(filtered_pos_keywords.values())[:10], color='green')
+                ax1.set_title("Топ-10 положительных ключевых слов")
+                ax1.set_xlabel("Частота")
+                ax1.invert_yaxis()
+                for bar in bars:
+                    width = bar.get_width()
+                    ax1.text(width, bar.get_y() + bar.get_height()/2, f'{int(width)}', ha='left', va='center')
+
+            if filtered_neg_keywords:
+                bars = ax2.barh(list(filtered_neg_keywords.keys())[:10], list(filtered_neg_keywords.values())[:10], color='red')
+                ax2.set_title("Топ-10 отрицательных ключевых слов")
+                ax2.set_xlabel("Частота")
+                ax2.invert_yaxis()
+                for bar in bars:
+                    width = bar.get_width()
+                    ax2.text(width, bar.get_y() + bar.get_height()/2, f'{int(width)}', ha='left', va='center')
+
+            plt.tight_layout()
+
+            top = ctk.CTkToplevel(self.root)
+            top.title("Гистограмма ключевых слов")
+            canvas = FigureCanvasTkAgg(fig, master=top)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+
+            self.log("Визуализация гистограммы завершена!")
+
+        def run():
+            filtered_pos, filtered_neg = compute_data()
+            if filtered_pos is not None and filtered_neg is not None and self.is_running:
+                self.root.after(0, show_visualization, filtered_pos, filtered_neg)
+
+        thread = threading.Thread(target=run)
+        self.threads.append(thread)
+        thread.start()
 
     def visualize_wordcloud(self):
-        """Визуализирует результаты анализа слов в виде облака слов."""
+        if not self.is_running:
+            return
         if not self.csv_files:
             self.log("Не выбраны CSV-файлы для анализа, нечего визуализировать!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Не выбраны CSV-файлы для анализа!")
             return
 
-        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
-        
-        # Собираем все отзывы из CSV-файлов
-        all_reviews = []
-        for csv_file in self.csv_files:
+        self.progress.set(0)
+        self.log("Запуск визуализации облака слов...")
+
+        def compute_data():
             try:
-                df = pd.read_csv(csv_file, encoding='utf-8')
-                if 'Текст отзыва' in df.columns:
-                    reviews = df['Текст отзыва'].dropna().tolist()
-                    all_reviews.extend(reviews)
-                elif 'Достоинства' in df.columns and 'Недостатки' in df.columns:
-                    pros_reviews = df['Достоинства'].dropna().tolist()
-                    cons_reviews = df['Недостатки'].dropna().tolist()
-                    all_reviews.extend(pros_reviews + cons_reviews)
-                else:
-                    self.log(f"CSV-файл {csv_file} не содержит подходящих столбцов для анализа!", is_error=True)
-                    continue
-            except Exception as e:
-                self.log(f"Ошибка при чтении файла {csv_file}: {str(e)}", is_error=True)
-                continue
-
-        if not all_reviews:
-            self.log("Нет отзывов для визуализации!", is_error=True)
-            return
-
-        # Обрабатываем отзывы и собираем аспекты
-        positive_keywords = []
-        negative_keywords = []
-        keyword_review_count = Counter()
-
-        for review in all_reviews:
-            sentences = analyzer.analyze_review_sentences(review)
-            review_pos_keywords = set()
-            review_neg_keywords = set()
-            for _, _, _, aspects in sentences:
-                for aspect_phrase, aspect_sentiment, _ in aspects:
-                    if aspect_phrase.lower() in analyzer.invalid_phrases:
+                all_reviews = []
+                for i, csv_file in enumerate(self.csv_files):
+                    if not self.is_running:
+                        return None, None
+                    try:
+                        df = pd.read_csv(csv_file, encoding='utf-8')
+                        if 'Текст отзыва' in df.columns:
+                            reviews = df['Текст отзыва'].dropna().tolist()
+                            all_reviews.extend(reviews)
+                        elif 'Достоинства' in df.columns and 'Недостатки' in df.columns:
+                            pros_reviews = df['Достоинства'].dropna().tolist()
+                            cons_reviews = df['Недостатки'].dropna().tolist()
+                            all_reviews.extend(pros_reviews + cons_reviews)
+                        else:
+                            self.log(f"CSV-файл {csv_file} не содержит подходящих столбцов для анализа!", is_error=True)
+                            continue
+                    except Exception as e:
+                        self.log(f"Ошибка при чтении файла {csv_file}: {str(e)}", is_error=True)
                         continue
-                    if aspect_sentiment == "положительное":
-                        positive_keywords.append(aspect_phrase)
-                        review_pos_keywords.add(aspect_phrase)
-                    elif aspect_sentiment == "отрицательное":
-                        negative_keywords.append(aspect_phrase)
-                        review_neg_keywords.add(aspect_phrase)
-            for keyword in review_pos_keywords:
-                keyword_review_count[keyword] += 1
-            for keyword in review_neg_keywords:
-                keyword_review_count[keyword] += 1
+                    self.progress.set((i + 1) / len(self.csv_files) * 100)
 
-        # Подсчитываем частотность ключевых слов
-        pos_keyword_counts = Counter(positive_keywords)
-        neg_keyword_counts = Counter(negative_keywords)
+                if not all_reviews:
+                    self.log("Нет отзывов для визуализации!", is_error=True)
+                    messagebox.showwarning("Предупреждение", "Нет отзывов для визуализации!")
+                    return None, None
 
-        # Фильтруем ключевые слова: оставляем только те, которые встречаются в более чем одном отзыве
-        MIN_REVIEW_THRESHOLD = 2
-        filtered_pos_keywords = {k: v for k, v in pos_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
-        filtered_neg_keywords = {k: v for k, v in neg_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
+                positive_keywords = []
+                negative_keywords = []
+                keyword_review_count = Counter()
 
-        # Генерация облака слов
-        plt.figure(figsize=(15, 6))
+                for review in all_reviews:
+                    if not self.is_running:
+                        return None, None
+                    sentences = self.analyzer.analyze_review_sentences(review)
+                    review_pos_keywords = set()
+                    review_neg_keywords = set()
+                    for _, _, _, aspects in sentences:
+                        for aspect_phrase, aspect_sentiment, _, _ in aspects:
+                            if aspect_phrase.lower() in self.analyzer.invalid_phrases:
+                                continue
+                            if aspect_sentiment == "положительное":
+                                positive_keywords.append(aspect_phrase)
+                                review_pos_keywords.add(aspect_phrase)
+                            elif aspect_sentiment == "отрицательное":
+                                negative_keywords.append(aspect_phrase)
+                                review_neg_keywords.add(aspect_phrase)
+                    for keyword in review_pos_keywords:
+                        keyword_review_count[keyword] += 1
+                    for keyword in review_neg_keywords:
+                        keyword_review_count[keyword] += 1
 
-        # Облако для положительных слов
-        if filtered_pos_keywords:
-            plt.subplot(1, 2, 1)
-            wordcloud_pos = WordCloud(width=800, height=400, background_color='black', colormap='Greens', min_font_size=10, max_words=50).generate_from_frequencies(filtered_pos_keywords)
-            plt.imshow(wordcloud_pos, interpolation='bilinear')
-            plt.title("Облако положительных слов", fontsize=16, color='white')
-            plt.axis('off')
+                pos_keyword_counts = Counter(positive_keywords)
+                neg_keyword_counts = Counter(negative_keywords)
 
-        # Облако для отрицательных слов
-        if filtered_neg_keywords:
-            plt.subplot(1, 2, 2)
-            wordcloud_neg = WordCloud(width=800, height=400, background_color='black', colormap='Reds', min_font_size=10, max_words=50).generate_from_frequencies(filtered_neg_keywords)
-            plt.imshow(wordcloud_neg, interpolation='bilinear')
-            plt.title("Облако отрицательных слов", fontsize=16, color='white')
-            plt.axis('off')
+                MIN_REVIEW_THRESHOLD = 2
+                filtered_pos_keywords = {k: v for k, v in pos_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
+                filtered_neg_keywords = {k: v for k, v in neg_keyword_counts.items() if keyword_review_count[k] >= MIN_REVIEW_THRESHOLD}
 
-        plt.tight_layout(pad=0)
-        plt.show()
-        self.log("Визуализация облака слов завершена!")
+                return filtered_pos_keywords, filtered_neg_keywords
+            except Exception as e:
+                self.log(f"Ошибка при вычислении данных для визуализации: {str(e)}", is_error=True)
+                messagebox.showerror("Ошибка", f"Не удалось выполнить вычисления: {str(e)}")
+                return None, None
+            finally:
+                self.progress.set(0)
+
+        def show_visualization(filtered_pos_keywords, filtered_neg_keywords):
+            if not self.is_running:
+                return
+
+            if filtered_pos_keywords is None or filtered_neg_keywords is None:
+                return
+
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 6))
+
+            if filtered_pos_keywords:
+                wordcloud_pos = WordCloud(width=800, height=400, background_color='black', colormap='Greens', min_font_size=10, max_words=50).generate_from_frequencies(filtered_pos_keywords)
+                ax1.imshow(wordcloud_pos, interpolation='bilinear')
+                ax1.set_title("Облако положительных слов", fontsize=16, color='white')
+                ax1.axis('off')
+
+            if filtered_neg_keywords:
+                wordcloud_neg = WordCloud(width=800, height=400, background_color='black', colormap='Reds', min_font_size=10, max_words=50).generate_from_frequencies(filtered_neg_keywords)
+                ax2.imshow(wordcloud_neg, interpolation='bilinear')
+                ax2.set_title("Облако отрицательных слов", fontsize=16, color='white')
+                ax2.axis('off')
+
+            plt.tight_layout(pad=0)
+
+            top = ctk.CTkToplevel(self.root)
+            top.title("Облако слов")
+            canvas = FigureCanvasTkAgg(fig, master=top)
+            canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+
+            self.log("Визуализация облака слов завершена!")
+
+        def run():
+            filtered_pos, filtered_neg = compute_data()
+            if filtered_pos is not None and filtered_neg is not None and self.is_running:
+                self.root.after(0, show_visualization, filtered_pos, filtered_neg)
+
+        thread = threading.Thread(target=run)
+        self.threads.append(thread)
+        thread.start()
 
     def log(self, message, is_error=False):
-        self.log_text.configure(state="normal")
-        tag = "ERROR" if is_error else "INFO"
-        color = "red" if is_error else "white"
-        self.log_text.tag_config(tag, foreground=color)
-        self.log_text.insert("end", f"[{time.strftime('%H:%M:%S')}] {tag}: {message}\n", tag)
-        self.log_text.configure(state="disabled")
-        self.log_text.see("end")
+        if not self.is_running:
+            return
+        try:
+            self.log_text.configure(state="normal")
+            tag = "ERROR" if is_error else "INFO"
+            color = "red" if is_error else "white"
+            self.log_text.tag_config(tag, foreground=color)
+            self.log_text.insert("end", f"[{time.strftime('%H:%M:%S')}] {tag}: {message}\n", tag)
+            self.log_text.configure(state="disabled")
+            self.log_text.see("end")
+        except Exception:
+            pass  # Игнорируем ошибки логирования, если GUI уже закрыт
 
     def add_link(self, site):
+        if not self.is_running:
+            return
         link = self.site_links[site].get()
         if link:
             self.log(f"Добавлена ссылка для {SITE_NAMES[site]}: {link}")
@@ -581,7 +665,7 @@ class ParserApp:
         handler.setLevel(logging.INFO)
         handler.addFilter(InfoFilter())
         handler.setFormatter(logging.Formatter("%(asctime)s - %(levelname)s - %(message)s"))
-        logging.getLogger().addHandler(handler)
+        logging.getLogger().handlers = [handler]
 
     def write(self, message):
         if message.strip():
@@ -591,16 +675,22 @@ class ParserApp:
         pass
 
     def select_output_dir(self):
+        if not self.is_running:
+            return
         directory = filedialog.askdirectory()
         if directory:
             self.output_dir.set(directory)
 
     def clear_log(self):
+        if not self.is_running:
+            return
         self.log_text.configure(state="normal")
         self.log_text.delete(1.0, ctk.END)
         self.log_text.configure(state="disabled")
 
     def open_output_dir(self):
+        if not self.is_running:
+            return
         output_dir = os.path.abspath(self.output_dir.get())
         if os.path.exists(output_dir):
             subprocess.Popen(f'explorer "{output_dir}"' if os.name == 'nt' else ['xdg-open', output_dir])
@@ -608,6 +698,8 @@ class ParserApp:
             self.log(f"Папка {output_dir} не существует", is_error=True)
 
     def toggle_parsing(self):
+        if not self.is_running:
+            return
         if self.running:
             self.running = False
             self.start_btn.configure(text="Старт")
@@ -617,7 +709,9 @@ class ParserApp:
             self.running = True
             self.start_btn.configure(text="Стоп")
             self.progress.start()
-            threading.Thread(target=self.run_parsers).start()
+            thread = threading.Thread(target=self.run_parsers)
+            self.threads.append(thread)
+            thread.start()
 
     def run_parsers(self):
         parsers = [(name, parser(), link) for site, (name, parser) in {
@@ -629,7 +723,7 @@ class ParserApp:
         total_steps = len(parsers)
 
         def run_parser(name, parser, link):
-            if not self.running:
+            if not self.running or not self.is_running:
                 return
             try:
                 self.log(f"Запуск парсера: {name}")
@@ -643,7 +737,6 @@ class ParserApp:
             for i, future in enumerate(futures):
                 future.result()
                 self.progress.set((i + 1) / total_steps * 100)
-                self.root.update_idletasks()
 
         self.running = False
         self.progress.set(0)
@@ -651,166 +744,240 @@ class ParserApp:
         messagebox.showinfo("Информация", "Парсинг завершён!")
 
     def select_files_for_analysis_by_site(self):
-        """Выбор CSV-файлов для анализа отзывов по сайтам и отображение результатов в таблице."""
+        if not self.is_running:
+            return
         csv_files = filedialog.askopenfilenames(filetypes=[("CSV files", "*.csv")])
         if not csv_files:
             self.log("Не выбраны CSV-файлы для анализа!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Не выбраны CSV-файлы для анализа!")
             return
 
-        # Сохраняем выбранные файлы для последующей визуализации и отчёта
         self.csv_files = list(csv_files)
-        self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())  # Обновляем анализатор
-        self.results_by_site = []  # Сохраняем результаты для отчёта
-
+        self.results_by_site = []
         self.result_tree.delete(*self.result_tree.get_children())
-        total_files = len(csv_files)
-        for i, csv_file in enumerate(csv_files):
-            try:
-                site_name = self.get_site_name_from_filename(csv_file)
-                if not site_name:
-                    self.log(f"Не удалось определить сайт для файла {csv_file}", is_error=True)
-                    continue
-                self.log(f"Анализируем файл: {csv_file}")
-                results = self.analyzer.analyze_reviews(csv_file)
-                self.results_by_site.append((site_name, results))
-                self.result_tree.insert("", "end", values=(
-                    site_name,
-                    results["Плюсы"],
-                    results["Минусы"],
-                    results["Ключевые слова (положительные)"],
-                    results["Ключевые слова (отрицательные)"],
-                    results["Общие ключевые слова"],
-                    results["Положительные отзывы"],
-                    results["Отрицательные отзывы"]
-                ))
-                progress = (i + 1) / total_files * 100
-                self.progress.set(progress)
-                self.root.update_idletasks()
-            except Exception as e:
-                self.log(f"Ошибка при анализе файла {csv_file}: {str(e)}", is_error=True)
-                continue
+        self.log(f"Запуск анализа по сайтам для файлов: {', '.join(csv_files)}")
+        thread = threading.Thread(target=self.run_analysis_by_site, args=(csv_files,))
+        self.threads.append(thread)
+        thread.start()
 
-        self.progress.set(0)
-        self.log("Анализ отзывов по сайтам завершён!")
-        self.tabview.set("Анализ слов")
+    def run_analysis_by_site(self, csv_files):
+        try:
+            self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+            total_files = len(csv_files)
+            for i, csv_file in enumerate(csv_files):
+                if not self.is_running:
+                    return
+                try:
+                    site_name = self.get_site_name_from_filename(csv_file)
+                    if not site_name:
+                        self.log(f"Не удалось определить сайт для файла {csv_file}", is_error=True)
+                        continue
+                    self.log(f"Анализируем файл: {csv_file}")
+                    if csv_file in self.analysis_cache:
+                        results = self.analysis_cache[csv_file]
+                        self.log(f"Использованы кэшированные результаты для {csv_file}")
+                    else:
+                        results = self.analyzer.analyze_reviews(csv_file)
+                        self.analysis_cache[csv_file] = results
+                        with open(f"{csv_file}.cache.json", "w", encoding="utf-8") as f:
+                            json.dump(results, f, ensure_ascii=False)
+                    self.results_by_site.append((site_name, results))
+                    self.result_tree.insert("", "end", values=(
+                        site_name,
+                        results["Плюсы"],
+                        results["Минусы"],
+                        results["Ключевые слова (положительные)"],
+                        results["Ключевые слова (отрицательные)"],
+                        results["Общие ключевые слова"],
+                        results["Положительные отзывы"],
+                        results["Отрицательные отзывы"]
+                    ))
+                    self.progress.set((i + 1) / total_files * 100)
+                except Exception as e:
+                    self.log(f"Ошибка при анализе файла {csv_file}: {str(e)}", is_error=True)
+                    continue
+            self.log("Анализ отзывов по сайтам завершён!")
+            self.tabview.set("Анализ слов")
+        except Exception as e:
+            self.log(f"Ошибка при анализе по сайтам: {str(e)}", is_error=True)
+            messagebox.showerror("Ошибка", f"Не удалось выполнить анализ: {str(e)}")
+        finally:
+            self.progress.set(0)
 
     def select_files_for_aggregated_analysis(self):
-        """Выбор CSV-файлов для агрегированного анализа отзывов и отображение результатов в таблице."""
+        if not self.is_running:
+            return
         csv_files = filedialog.askopenfilenames(filetypes=[("CSV files", "*.csv")])
         if not csv_files:
             self.log("Не выбраны CSV-файлы для анализа!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Не выбраны CSV-файлы для анализа!")
             return
 
-        # Сохраняем выбранные файлы для последующей визуализации и отчёта
         self.csv_files = list(csv_files)
-        self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())  # Обновляем анализатор
-
         self.result_tree.delete(*self.result_tree.get_children())
-        self.log(f"Анализируем файлы: {', '.join(csv_files)}")
-        
-        # Выполняем агрегированный анализ
-        self.aggregated_results = self.analyzer.aggregate_reviews(csv_files)
-        
-        # Формируем одну строку для таблицы
-        self.result_tree.insert("", "end", values=(
-            "Агрегированный анализ",
-            self.aggregated_results.get("Плюсы (все сайты)", ""),
-            self.aggregated_results.get("Минусы (все сайты)", ""),
-            self.aggregated_results.get("Ключевые слова (положительные, все сайты)", ""),
-            self.aggregated_results.get("Ключевые слова (отрицательные, все сайты)", ""),
-            self.aggregated_results.get("Общие ключевые слова (все сайты)", ""),
-            self.aggregated_results.get("Положительные отзывы (все сайты)", ""),
-            self.aggregated_results.get("Отрицательные отзывы (все сайты)", "")
-        ))
-        
-        self.progress.set(0)
-        self.log("Агрегированный анализ отзывов завершён!")
-        self.tabview.set("Анализ слов")
+        self.log(f"Запуск агрегированного анализа файлов: {', '.join(csv_files)}")
+        thread = threading.Thread(target=self.run_aggregated_analysis, args=(csv_files,))
+        self.threads.append(thread)
+        thread.start()
+
+    def run_aggregated_analysis(self, csv_files):
+        try:
+            self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+            cache_key = tuple(sorted(csv_files))
+            if cache_key in self.analysis_cache:
+                self.aggregated_results = self.analysis_cache[cache_key]
+                self.log("Использованы кэшированные результаты для агрегированного анализа")
+            else:
+                self.aggregated_results = self.analyzer.aggregate_reviews(csv_files)
+                self.analysis_cache[cache_key] = self.aggregated_results
+                with open("aggregated_analysis.cache.json", "w", encoding="utf-8") as f:
+                    json.dump(self.aggregated_results, f, ensure_ascii=False)
+            self.result_tree.insert("", "end", values=(
+                "Агрегированный анализ",
+                self.aggregated_results.get("Плюсы (все сайты)", ""),
+                self.aggregated_results.get("Минусы (все сайты)", ""),
+                self.aggregated_results.get("Ключевые слова (положительные, все сайты)", ""),
+                self.aggregated_results.get("Ключевые слова (отрицательные, все сайты)", ""),
+                self.aggregated_results.get("Общие ключевые слова (все сайты)", ""),
+                self.aggregated_results.get("Положительные отзывы (все сайты)", ""),
+                self.aggregated_results.get("Отрицательные отзывы (все сайты)", "")
+            ))
+            self.log("Агрегированный анализ отзывов завершён!")
+            self.tabview.set("Анализ слов")
+        except Exception as e:
+            self.log(f"Ошибка при агрегированном анализе: {str(e)}", is_error=True)
+            messagebox.showerror("Ошибка", f"Не удалось выполнить агрегированный анализ: {str(e)}")
+        finally:
+            self.progress.set(0)
 
     def select_files_for_detailed_analysis(self):
-        """Выбор CSV-файлов для детального анализа предложений."""
+        if not self.is_running:
+            return
         csv_files = filedialog.askopenfilenames(filetypes=[("CSV files", "*.csv")])
         if not csv_files:
             self.log("Не выбраны CSV-файлы для анализа!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Не выбраны CSV-файлы для анализа!")
             return
         
-        for csv_file in csv_files:
-            self.analyze_sentences_detailed(csv_file)
+        self.log("Запуск детального анализа предложений...")
+        thread = threading.Thread(target=self.run_detailed_analysis, args=(csv_files,))
+        self.threads.append(thread)
+        thread.start()
 
-    def analyze_sentences_detailed(self, csv_file):
-        """Анализирует предложения в отзывах из CSV-файла и отображает результаты."""
-        analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
-        self.detailed_tree.delete(*self.detailed_tree.get_children())
-        
+    def run_detailed_analysis(self, csv_files):
         try:
-            df = pd.read_csv(csv_file, encoding='utf-8')
-            if 'Текст отзыва' in df.columns:
-                reviews = df['Текст отзыва'].dropna().tolist()
-            elif 'Достоинства' in df.columns and 'Недостатки' in df.columns:
-                reviews = (df['Достоинства'].dropna().tolist() + 
-                           df['Недостатки'].dropna().tolist())
-            else:
-                self.log(f"CSV-файл {csv_file} не содержит подходящих столбцов для анализа!", is_error=True)
-                return
-            
-            total_reviews = len(reviews)
-            for i, review in enumerate(reviews):
-                sentences_analysis = analyzer.analyze_review_sentences(review)
-                for sentence, sentiment, score, aspects in sentences_analysis:
-                    aspects_str = "; ".join([f"{aspect}: {sent} ({s:.2f})" for aspect, sent, s in aspects])
-                    self.detailed_tree.insert("", "end", values=(
-                        sentence,
-                        sentiment,
-                        f"{score:.2f}",
-                        aspects_str
-                    ))
-                # Обновляем прогресс
-                progress = (i + 1) / total_reviews * 100
-                self.progress_detailed.set(progress)
-                self.root.update_idletasks()
-            
-            self.progress_detailed.set(0)
-            self.log(f"Детальный анализ предложений для {csv_file} завершён!")
+            self.analyzer = ReviewAnalyzer(use_preprocessing=self.use_preprocessing.get())
+            self.detailed_tree.delete(*self.detailed_tree.get_children())
+            total_files = len(csv_files)
+            for i, csv_file in enumerate(csv_files):
+                if not self.is_running:
+                    return
+                try:
+                    df = pd.read_csv(csv_file, encoding='utf-8')
+                    if 'Текст отзыва' in df.columns:
+                        reviews = df['Текст отзыва'].dropna().tolist()
+                    elif 'Достоинства' in df.columns and 'Недостатки' in df.columns:
+                        reviews = (df['Достоинства'].dropna().tolist() + 
+                                   df['Недостатки'].dropna().tolist())
+                    else:
+                        self.log(f"CSV-файл {csv_file} не содержит подходящих столбцов для анализа!", is_error=True)
+                        continue
+                    
+                    total_reviews = len(reviews)
+                    for j, review in enumerate(reviews):
+                        if not self.is_running:
+                            return
+                        sentences_analysis = self.analyzer.analyze_review_sentences(review)
+                        for sentence, sentiment, score, aspects in sentences_analysis:
+                            aspects_str = "; ".join([f"{aspect}: {sent} ({s:.2f})" for aspect, sent, s, _ in aspects])
+                            self.detailed_tree.insert("", "end", values=(
+                                sentence,
+                                sentiment,
+                                f"{score:.2f}",
+                                aspects_str
+                            ))
+                        self.progress_detailed.set((j + 1) / total_reviews * 100)
+                    self.progress_detailed.set(0)
+                    self.log(f"Детальный анализ предложений для {csv_file} завершён!")
+                except Exception as e:
+                    self.log(f"Ошибка при детальном анализе файла {csv_file}: {str(e)}", is_error=True)
+                    messagebox.showerror("Ошибка", f"Не удалось обработать файл {csv_file}: {str(e)}")
+                    continue
+                self.progress.set((i + 1) / total_files * 100)
             self.tabview.set("Детальный анализ предложений")
-        
         except Exception as e:
-            self.log(f"Ошибка при детальном анализе файла {csv_file}: {str(e)}", is_error=True)
+            self.log(f"Ошибка при детальном анализе: {str(e)}", is_error=True)
+            messagebox.showerror("Ошибка", f"Не удалось выполнить детальный анализ: {str(e)}")
+        finally:
+            self.progress.set(0)
             self.progress_detailed.set(0)
 
     def generate_report_by_site(self):
-        """Генерирует текстовый отчёт по сайтам."""
+        if not self.is_running:
+            return
         if not hasattr(self, 'results_by_site') or not self.results_by_site:
             self.log("Сначала выполните анализ по сайтам на вкладке 'Анализ слов'!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Сначала выполните анализ по сайтам!")
             return
 
-        self.report_textbox.delete("0.0", "end")
-        product_name = self.product_name.get().strip() or "продукт"
-        full_report = ""
+        self.log("Генерация отчёта по сайтам...")
+        thread = threading.Thread(target=self.run_generate_report_by_site)
+        self.threads.append(thread)
+        thread.start()
 
-        for site_name, results in self.results_by_site:
-            full_report += f"Отчёт для {site_name}:\n\n"
-            report = self.analyzer.generate_detailed_report(results, product_name=product_name)
-            full_report += report + "\n" + "="*50 + "\n\n"
-
-        self.report_textbox.insert("0.0", full_report)
-        self.log("Текстовый отчёт по сайтам сгенерирован!")
-        self.tabview.set("Текстовый отчёт")
+    def run_generate_report_by_site(self):
+        try:
+            self.progress_report.set(0)
+            self.report_textbox.delete("0.0", "end")
+            product_name = self.product_name.get().strip() or "продукт"
+            full_report = ""
+            total_sites = len(self.results_by_site)
+            for i, (site_name, results) in enumerate(self.results_by_site):
+                if not self.is_running:
+                    return
+                full_report += f"Отчёт для {site_name}:\n\n"
+                report = self.analyzer.generate_detailed_report(results, product_name=product_name)
+                full_report += report + "\n" + "="*50 + "\n\n"
+                self.progress_report.set((i + 1) / total_sites * 100)
+            self.report_textbox.insert("0.0", full_report)
+            self.log("Текстовый отчёт по сайтам сгенерирован!")
+            self.tabview.set("Текстовый отчёт")
+        except Exception as e:
+            self.log(f"Ошибка при генерации отчёта по сайтам: {str(e)}", is_error=True)
+            messagebox.showerror("Ошибка", f"Не удалось сгенерировать отчёт: {str(e)}")
+        finally:
+            self.progress_report.set(0)
 
     def generate_aggregated_report(self):
-        """Генерирует агрегированный текстовый отчёт."""
+        if not self.is_running:
+            return
         if not hasattr(self, 'aggregated_results'):
             self.log("Сначала выполните агрегированный анализ на вкладке 'Анализ слов'!", is_error=True)
+            messagebox.showwarning("Предупреждение", "Сначала выполните агрегированный анализ!")
             return
 
-        self.report_textbox.delete("0.0", "end")
-        product_name = self.product_name.get().strip() or "продукт"
-        report = self.analyzer.generate_detailed_report(self.aggregated_results, product_name=product_name)
-        self.report_textbox.insert("0.0", report)
-        self.log("Агрегированный текстовый отчёт сгенерирован!")
-        self.tabview.set("Текстовый отчёт")
+        self.log("Генерация агрегированного отчёта...")
+        thread = threading.Thread(target=self.run_generate_aggregated_report)
+        self.threads.append(thread)
+        thread.start()
+
+    def run_generate_aggregated_report(self):
+        try:
+            self.progress_report.set(0)
+            self.report_textbox.delete("0.0", "end")
+            product_name = self.product_name.get().strip() or "продукт"
+            report = self.analyzer.generate_detailed_report(self.aggregated_results, product_name=product_name)
+            self.report_textbox.insert("0.0", report)
+            self.progress_report.set(100)
+            self.log("Агрегированный текстовый отчёт сгенерирован!")
+            self.tabview.set("Текстовый отчёт")
+        except Exception as e:
+            self.log(f"Ошибка при генерации агрегированного отчёта: {str(e)}", is_error=True)
+            messagebox.showerror("Ошибка", f"Не удалось сгенерировать отчёт: {str(e)}")
+        finally:
+            self.progress_report.set(0)
 
     def get_site_name_from_filename(self, filename):
-        """Извлекает имя сайта из имени файла, используя SITE_NAMES."""
         base_name = os.path.basename(filename).lower()
         if "otzovik" in base_name:
             return SITE_NAMES["site1"]
@@ -819,12 +986,6 @@ class ParserApp:
         elif "ozon" in base_name:
             return SITE_NAMES["site3"]
         return None
-
-    def run_visualization(self, file_path):
-        try:
-            plot_rating_histogram(file_path)
-        except Exception as e:
-            self.log(f"Ошибка при визуализации: {str(e)}", is_error=True)
 
     def bind_shortcuts(self):
         def handle_ctrl_key(event):
@@ -881,11 +1042,18 @@ class ParserApp:
             json.dump(config, f)
 
     def on_closing(self):
-        if self.running:
-            self.running = False
-            time.sleep(1)
+        self.is_running = False  # Останавливаем все операции
+        self.running = False  # Останавливаем парсинг
+
+        # Ждём завершения всех потоков
+        for thread in self.threads:
+            if thread.is_alive():
+                thread.join(timeout=2.0)  # Даём потокам 2 секунды на завершение
+
         self.save_config()
-        self.root.destroy()
+
+        # Завершаем цикл событий Tkinter
+        self.root.quit()
 
 if __name__ == "__main__":
     root = ctk.CTk()
