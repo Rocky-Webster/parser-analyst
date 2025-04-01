@@ -16,7 +16,6 @@ logger = setup_logger()
 
 class Site3Parser:
     def __init__(self):
-        # Обновлённые селекторы для повышения устойчивости к изменениям классов
         self.selectors = {
             'reviews_tab': "//div[contains(text(), 'ОТЗЫВЫ') or contains(text(), 'Отзывы') or contains(@href, '/reviews/')]",
             'product_name': (
@@ -38,45 +37,29 @@ class Site3Parser:
                 "//div[contains(@data-widget, 'review')] | "
                 "//div[contains(@class, 'review') and .//div[contains(text(), 'Комментарий') or .//svg]]"
             ),
-            'username': (
-                ".//span[@itemprop='name'] | "
-                ".//div[contains(@class, 'user')] | "
-                ".//div[contains(@class, 'author')] | "
-                ".//span[contains(@class, 'v5p')] | "
-                ".//div[contains(@class, 'vp5')]//span | "
-                ".//div[./preceding-sibling::div[contains(text(), 'Автор')]]"
-            ),
-            'date': (
-                ".//span[@itemprop='datePublished'] | "
-                ".//div[contains(@class, 'date')] | "
-                ".//div[contains(@class, 'p3y')] | "
-                ".//div[./preceding-sibling::div[contains(text(), 'Дата')]]"
-            ),
-            'review_text': (
-                ".//div[@itemprop='description'] | "
-                ".//div[contains(@class, 'text')] | "
-                ".//div[contains(text(), 'Комментарий')]//following-sibling::div | "
-                ".//span[contains(@class, 'y4p')] | "
-                ".//div[contains(@class, 'p5y')]//span | "
-                ".//div[./preceding-sibling::div[contains(text(), 'Комментарий') or contains(text(), 'Отзыв')]]"
-            ),
-            'rating_stars': (
-                ".//div[contains(@data-widget, 'webStars')] | "
-                ".//div[@itemprop='ratingValue'] | "
-                ".//div[contains(@class, 'y3p')]//svg | "
-                ".//div[./svg[contains(@style, 'color')]]"
-            ),
+            'username': ".//div[contains(@class, 'pu8_31')]//span[contains(@class, 'p8u_31')]",
+            'date': ".//div[contains(@class, 'x5p_31')]",
+            'review_text': ".//span[contains(@class, 'p7x_31')]",
+            'rating_stars': ".//div[contains(@class, 'p6x_31')]//svg",  # Ищем все звёзды
             'pagination': (
-                "//div[contains(@class, 'pw6') or contains(@class, 'pagination') or contains(@data-widget, 'webPagination')]//a[contains(@href, '/reviews/') and contains(@href, 'page=')] | "
+                "//div[contains(@class, 'vp8_31') or contains(@class, 'pw6') or contains(@class, 'pagination') or contains(@data-widget, 'webPagination')]//a[contains(@href, '/reviews/') and contains(@href, 'page=')] | "
+                "//a[.//div[contains(text(), 'Дальше')]] | "
                 "//a[contains(text(), 'Дальше')] | "
                 "//a[contains(text(), 'след')] | "
+                "//a[contains(text(), 'Вперёд')] | "
                 "//a[contains(@aria-label, 'Next')] | "
-                "//div[contains(@class, 'pw6')]//a[not(contains(@class, 'pw4')) and contains(@href, '/reviews/')]"
+                "//a[contains(@aria-label, 'Следующая')] | "
+                "//div[contains(@class, 'vp8_31') or contains(@class, 'pw6')]//a[not(contains(@class, 'v7p_31')) and contains(@href, '/reviews/')] | "
+                "//a[./*[local-name()='svg'] and contains(@href, '/reviews/')] | "
+                "//a[contains(@data-page, 'next')] | "
+                "//button[contains(text(), 'Дальше')] | "
+                "//button[contains(text(), 'след')] | "
+                "//button[contains(@aria-label, 'Next')]"
             )
         }
+        self.max_pages = 5
 
     def find_element_safely(self, parent, selector, by=By.XPATH, timeout=5):
-        """Безопасный поиск элемента с обработкой таймаута и исключений"""
         try:
             if by == By.XPATH:
                 elements = parent.find_elements(by, selector)
@@ -86,21 +69,22 @@ class Site3Parser:
                 elements = parent.find_elements(by, selector)
                 if elements:
                     return elements[0]
+            logger.debug(f"Элемент не найден по селектору: {selector}")
             return None
         except Exception as e:
-            logger.debug(f"Не удалось найти элемент с селектором {selector}: {e}")
+            logger.debug(f"Ошибка при поиске элемента с селектором {selector}: {e}")
             return None
 
     def find_elements_safely(self, parent, selector, by=By.XPATH):
-        """Безопасный поиск элементов с обработкой исключений"""
         try:
-            return parent.find_elements(by, selector)
+            elements = parent.find_elements(by, selector)
+            logger.debug(f"Найдено {len(elements)} элементов с селектором {selector}")
+            return elements
         except Exception as e:
             logger.debug(f"Не удалось найти элементы с селектором {selector}: {e}")
             return []
 
     def get_text_safely(self, element):
-        """Безопасное извлечение текста из элемента"""
         if element is None:
             return ""
         try:
@@ -114,44 +98,36 @@ class Site3Parser:
             return ""
 
     def get_rating(self, review, driver):
-        """Извлечение рейтинга с использованием нескольких методов"""
         try:
-            # Метод 1: Подсчёт SVG-звёзд (новая структура)
-            stars_elems = self.find_elements_safely(review, self.selectors['rating_stars'])
-            if stars_elems:
-                for stars_elem in stars_elems:
-                    active_stars = self.find_elements_safely(
-                        stars_elem,
-                        ".//svg[contains(@style, 'color') and .//path[contains(@d, 'M9.358')]]"
-                    )
-                    if active_stars:
-                        return len(active_stars)
+            # Прокручиваем к блоку рейтинга для уверенности
+            rating_container = self.find_element_safely(review, ".//div[contains(@class, 'p6x_31')]")
+            if rating_container:
+                driver.execute_script("arguments[0].scrollIntoView(true);", rating_container)
+                time.sleep(0.5)  # Даём время на рендеринг
 
-            # Метод 2: Поиск рейтинга через itemprop
-            rating_elem = self.find_element_safely(review, ".//*[@itemprop='ratingValue']")
-            if rating_elem:
-                rating_text = self.get_text_safely(rating_elem)
-                if rating_text and rating_text.isdigit():
-                    return int(rating_text)
-                rating_value = rating_elem.get_attribute('content')
-                if rating_value and rating_value.isdigit():
-                    return int(rating_value)
+            stars = self.find_elements_safely(review, self.selectors['rating_stars'])
+            if stars:
+                rating = 0
+                for star in stars:
+                    style = star.get_attribute('style') or ''
+                    logger.debug(f"Стиль звезды: {style}")
+                    # Учитываем вариации форматирования цвета
+                    if 'rgba(255, 165, 0, 1)' in style or 'rgb(255, 165, 0)' in style.replace(' ', ''):
+                        rating += 1
+                logger.debug(f"Найдено {len(stars)} звёзд, заполнено: {rating}")
+                if rating > 0:
+                    return rating
+                else:
+                    logger.warning("Звёзды найдены, но ни одна не заполнена (все серые?)")
+                    return 0
 
-            # Метод 3: Поиск текста, упоминающего звёзды
-            all_text = self.get_text_safely(review)
-            if all_text:
-                match = re.search(r'(\d+)(?:\s*из\s*5|\s*звезд)', all_text)
-                if match:
-                    return int(match.group(1))
-
-            # По умолчанию возвращаем 4, если ничего не найдено
-            return 4
+            logger.warning("Звёзды рейтинга не найдены")
+            return 0
         except Exception as e:
             logger.debug(f"Ошибка при определении рейтинга: {e}")
-            return 4
+            return 0
 
     def click_element_safely(self, driver, element):
-        """Безопасный клик по элементу с использованием JavaScript"""
         try:
             driver.execute_script("arguments[0].click();", element)
             return True
@@ -173,15 +149,11 @@ class Site3Parser:
             driver = setup_browser()
             driver.get(link)
             logger.info(f"Начинаем парсинг отзывов с сайта Ozon: {link}")
-
-            # Даём странице время на загрузку
             time.sleep(5)
 
-            # Шаг 1: Получаем название товара
             product_name = None
             main_page_product_name = None
 
-            # Сначала пытаемся получить название товара с главной страницы
             try:
                 product_name_elem = self.find_element_safely(driver, self.selectors['product_name'])
                 if product_name_elem:
@@ -192,7 +164,6 @@ class Site3Parser:
             except Exception as e:
                 logger.warning(f"Ошибка при поиске названия товара на главной странице: {e}")
 
-            # Переходим на вкладку отзывов, если мы ещё не там
             if "/reviews/" not in link:
                 try:
                     reviews_tab = self.find_element_safely(driver, self.selectors['reviews_tab'])
@@ -205,7 +176,6 @@ class Site3Parser:
                 except Exception as e:
                     logger.warning(f"Ошибка при переходе на вкладку отзывов: {e}")
 
-            # Пытаемся снова получить название товара на странице отзывов, если не нашли ранее
             try:
                 product_name_elem = self.find_element_safely(driver, self.selectors['product_name'])
                 if product_name_elem:
@@ -224,22 +194,22 @@ class Site3Parser:
                 else:
                     logger.warning("Название товара не найдено ни на одной из страниц")
 
-            # Формируем имя файла
             if product_name:
-                safe_product_name = re.sub(r'[<>:"/\\|?*]+', '', product_name).replace(' ', '_')
+                safe_product_name = re.sub(r'[<>:"/\\|?*]+', '', product_name)
+                safe_product_name = re.sub(r'[\n\r]+', ' ', safe_product_name)
+                safe_product_name = re.sub(r'^\d+\s*', '', safe_product_name)
+                safe_product_name = safe_product_name.strip().replace(' ', '_')
                 save_filename = f"{safe_product_name}_ozon.csv"
             else:
                 save_filename = "ozon_reviews.csv"
 
             save_path = os.path.join(output_dir if output_dir else SITE3_DATA_PATH, save_filename)
+            logger.info(f"Имя файла для сохранения: {save_filename}")
 
-            # Шаг 2: Парсим отзывы
             parsed_reviews = []
             seen_reviews = set()
-            max_pages = 5
             current_page = 1
 
-            # Убедимся, что мы на странице отзывов
             current_url = driver.current_url
             if "/reviews/" not in current_url:
                 try:
@@ -253,26 +223,25 @@ class Site3Parser:
                 except Exception as e:
                     logger.warning(f"Ошибка при переходе на страницу отзывов: {e}")
 
-            # Цикл по страницам
-            while current_page <= max_pages:
+            while current_page <= self.max_pages:
                 logger.info(f"Парсим страницу {current_page}")
 
-                # Даём странице загрузиться и ждём блок пагинации
                 try:
-                    WebDriverWait(driver, 5).until(
-                        EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'pw6')]"))
+                    pagination_container = WebDriverWait(driver, 10).until(
+                        EC.presence_of_element_located((By.XPATH, "//div[contains(@class, 'p8v_31') or contains(@class, 't1r_31')]"))
                     )
                     logger.info("Блок пагинации загружен")
+                    driver.execute_script("arguments[0].scrollIntoView(true);", pagination_container)
+                    time.sleep(1)
                 except TimeoutException:
                     logger.warning("Блок пагинации не найден после ожидания")
+                    break
 
-                # Прокручиваем страницу, чтобы загрузить все отзывы
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight / 2);")
                 time.sleep(1)
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time.sleep(1)
 
-                # Переключаемся на iframe, если он есть
                 try:
                     frames = driver.find_elements(By.TAG_NAME, "iframe")
                     for frame in frames:
@@ -283,13 +252,7 @@ class Site3Parser:
                 except Exception as e:
                     logger.debug(f"Не удалось переключиться на iframe: {e}")
 
-                # Ищем отзывы с использованием нескольких методов
-                reviews = []
-
-                # Метод 1: Основной селектор
                 reviews = self.find_elements_safely(driver, self.selectors['review_container'])
-
-                # Метод 2: Альтернативный CSS-селектор
                 if not reviews:
                     reviews = self.find_elements_safely(
                         driver,
@@ -297,36 +260,14 @@ class Site3Parser:
                         By.CSS_SELECTOR
                     )
 
-                # Метод 3: Ищем блоки с звёздами
-                if not reviews:
-                    stars_containers = self.find_elements_safely(driver, self.selectors['rating_stars'])
-                    if stars_containers:
-                        for container in stars_containers:
-                            parent = container.find_element(By.XPATH, "./ancestor::div[@data-review-uuid or contains(@data-widget, 'review')]")
-                            if parent and parent not in reviews:
-                                reviews.append(parent)
-
-                # Метод 4: Ищем через itemprop
-                if not reviews:
-                    reviews = self.find_elements_safely(driver, "//*[@itemprop='review']")
-
-                # Метод 5: Ищем текст, указывающий на отзыв
-                if not reviews:
-                    reviews = self.find_elements_safely(
-                        driver,
-                        "//div[contains(text(), 'Комментарий') or contains(text(), 'Достоинства') or contains(text(), 'Недостатки')]//ancestor::div[3]"
-                    )
-
                 logger.info(f"Найдено {len(reviews)} отзывов")
 
-                # Отладка, если отзывы не найдены
                 if not reviews:
                     logger.warning("На этой странице отзывы не найдены")
                     try:
                         screenshot_path = os.path.join(output_dir if output_dir else SITE3_DATA_PATH, f"debug_page_{current_page}.png")
                         driver.save_screenshot(screenshot_path)
                         logger.info(f"Сохранён отладочный скриншот: {screenshot_path}")
-
                         html_path = os.path.join(output_dir if output_dir else SITE3_DATA_PATH, f"debug_page_{current_page}.html")
                         with open(html_path, 'w', encoding='utf-8') as f:
                             f.write(driver.page_source)
@@ -334,44 +275,23 @@ class Site3Parser:
                     except Exception as e:
                         logger.warning(f"Не удалось сохранить отладочную информацию: {e}")
                 else:
-                    # Обрабатываем найденные отзывы
                     for review in reviews:
                         try:
-                            # Получаем имя пользователя
                             username_elem = self.find_element_safely(review, self.selectors['username'])
                             username = self.get_text_safely(username_elem) or "Анонимный пользователь"
+                            logger.debug(f"Извлечённое имя пользователя: {username}")
 
-                            # Получаем дату
                             date_elem = self.find_element_safely(review, self.selectors['date'])
                             date = self.get_text_safely(date_elem) or "Дата не указана"
+                            logger.debug(f"Извлечённая дата: {date}")
 
-                            # Получаем текст отзыва
                             review_text_elem = self.find_element_safely(review, self.selectors['review_text'])
                             review_text = self.get_text_safely(review_text_elem) or ""
+                            logger.debug(f"Извлечённый текст отзыва: {review_text[:50]}...")
 
-                            # Извлекаем достоинства и недостатки для резерва
-                            pros_elem = self.find_element_safely(review, ".//div[contains(text(), 'Достоинства')]//following-sibling::div")
-                            cons_elem = self.find_element_safely(review, ".//div[contains(text(), 'Недостатки')]//following-sibling::div")
-                            comment_elem = self.find_element_safely(review, ".//div[contains(text(), 'Комментарий')]//following-sibling::div")
-
-                            pros = self.get_text_safely(pros_elem)
-                            cons = self.get_text_safely(cons_elem)
-                            comment = self.get_text_safely(comment_elem)
-
-                            # Если текст отзыва пуст, формируем его из достоинств, недостатков и комментария
-                            if not review_text and (pros or cons or comment):
-                                review_text = ""
-                                if pros:
-                                    review_text += f"Достоинства: {pros}\n"
-                                if cons:
-                                    review_text += f"Недостатки: {cons}\n"
-                                if comment:
-                                    review_text += f"Комментарий: {comment}"
-
-                            # Получаем рейтинг
                             rating = self.get_rating(review, driver)
+                            logger.debug(f"Извлечённый рейтинг: {rating}")
 
-                            # Проверяем на дубликаты
                             review_key = (username, date, review_text[:50])
                             if review_key not in seen_reviews:
                                 seen_reviews.add(review_key)
@@ -384,37 +304,49 @@ class Site3Parser:
                         except Exception as e:
                             logger.warning(f"Ошибка при обработке отзыва: {e}")
 
-                # Переходим на следующую страницу
                 next_page_found = False
                 try:
-                    pagination_links = self.find_elements_safely(driver, self.selectors['pagination'])
+                    pagination_links = self.find_elements_safely(
+                        pagination_container,
+                        ".//a[contains(@href, '/reviews/') and (contains(@class, 'vp6_31') or contains(text(), 'Дальше'))]"
+                    )
                     if pagination_links:
                         logger.info(f"Найдено {len(pagination_links)} ссылок пагинации")
+                        current_page_num = current_page
+                        next_page_link = None
                         for link in pagination_links:
-                            page_num_text = self.get_text_safely(link)
                             href = link.get_attribute('href') or ""
-                            try:
-                                # Извлекаем номер страницы из href
-                                if 'page=' in href:
+                            link_text = self.get_text_safely(link).lower()
+                            if "дальше" in link_text or "next" in link_text:
+                                next_page_link = link
+                                logger.debug(f"Найдена кнопка 'Дальше': {href}")
+                                break
+                            if 'page=' in href:
+                                try:
                                     page_num = int(re.search(r'page=(\d+)', href).group(1))
                                     if page_num == current_page + 1:
-                                        self.click_element_safely(driver, link)
-                                        logger.info(f"Переходим на страницу {page_num}")
-                                        next_page_found = True
-                                        time.sleep(3)
+                                        next_page_link = link
+                                        logger.debug(f"Найдена следующая страница {page_num}: {href}")
                                         break
-                            except (ValueError, AttributeError):
-                                # Проверяем наличие кнопки "Дальше"
-                                if "Дальше" in page_num_text.lower() or "след" in page_num_text.lower() or "next" in page_num_text.lower() or "→" in page_num_text:
-                                    self.click_element_safely(driver, link)
-                                    logger.info("Переходим на следующую страницу")
-                                    next_page_found = True
-                                    time.sleep(3)
-                                    break
+                                except (ValueError, AttributeError):
+                                    continue
+                        if next_page_link:
+                            if self.click_element_safely(driver, next_page_link):
+                                logger.info(f"Переходим на следующую страницу")
+                                next_page_found = True
+                                time.sleep(3)
+                            else:
+                                logger.warning("Не удалось кликнуть по ссылке следующей страницы")
+                                break
+                        else:
+                            logger.info("Ссылка на следующую страницу не найдена")
+                            break
                     else:
-                        logger.warning("Ссылки пагинации не найдены")
+                        logger.warning("Ссылки пагинации не найдены в контейнере")
+                        break
                 except Exception as e:
-                    logger.warning(f"Ошибка при переходе на следующую страницу: {e}")
+                    logger.warning(f"Ошибка при обработке пагинации: {e}")
+                    break
 
                 if not next_page_found:
                     logger.info("Следующая страница не найдена, парсинг завершён")
@@ -422,13 +354,11 @@ class Site3Parser:
 
                 current_page += 1
 
-            # Возвращаемся к основному содержимому
             try:
                 driver.switch_to.default_content()
             except Exception:
                 pass
 
-            # Сохраняем результаты
             if parsed_reviews:
                 os.makedirs(os.path.dirname(save_path), exist_ok=True)
                 save_to_csv(parsed_reviews, save_path)
